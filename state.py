@@ -28,7 +28,8 @@ def _valid_path(path: object) -> bool:
     if not isinstance(path, str) or not path:
         return False
     parsed = PurePosixPath(path)
-    return not parsed.is_absolute() and ".." not in parsed.parts
+    # A path without parts, such as `.` or `./`, names the workspace itself.
+    return bool(parsed.parts) and not parsed.is_absolute() and ".." not in parsed.parts
 
 
 async def read_thread_worktree(

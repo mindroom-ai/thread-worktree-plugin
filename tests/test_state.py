@@ -59,10 +59,22 @@ async def test_missing_branch_reads_empty() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "content",
-    [None, {}, {"branch": "x"}, {"path": 3}, {"path": ""}, {"path": "/abs/dir"}, {"path": "a/../b"}, {"path": ".."}],
+    [
+        None,
+        {},
+        {"branch": "x"},
+        {"path": 3},
+        {"path": ""},
+        {"path": "/abs/dir"},
+        {"path": "a/../b"},
+        {"path": ".."},
+        {"path": "."},
+        {"path": "./"},
+        {"path": "./."},
+    ],
 )
 async def test_invalid_content_reads_none(content: Any) -> None:  # noqa: ANN401
-    """Empty or invalid content reads as no worktree."""
+    """Empty or invalid content, and a path that names the workspace itself, read as no worktree."""
     assert await state.read_thread_worktree(AsyncMock(return_value=content), ROOM, THREAD) is None
 
 
