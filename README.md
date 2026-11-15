@@ -18,7 +18,7 @@ This plugin needs a MindRoom with plugin API 1.31 (`"mindroom_plugin_api": "1.31
 ## Features
 
 - Stores each thread's worktree as a Matrix state event under `com.mindroom.thread.worktree`
-- Runs every turn of a tied thread in its directory, including a turn resumed after a tool approval
+- Runs every turn the tying agent takes in a tied thread in its directory, including a turn resumed after a tool approval
 - Exposes thread-scoped tools to tie, untie and show the worktree by hand
 - Records the branch, `set_by` and `set_at` with every tie
 
@@ -31,6 +31,8 @@ This plugin needs a MindRoom with plugin API 1.31 (`"mindroom_plugin_api": "1.31
 5. `leave_worktree` clears the event, and the thread's turns run in the workspace again.
 
 A tie applies from the thread's next turn, not the turn that made it.
+
+The tie belongs to the agent that made it: the directory is in that agent's workspace, so only that agent's turns in the thread work there, and other agents in the thread are not affected. A thread has one tie, so `use_worktree` by another agent replaces it (the last one wins), and its answer names the previous `path` and `set_by` under `replaced`.
 
 What is refused:
 
@@ -66,7 +68,7 @@ The turn waits for the hooks, so they bound their state read to 2.5 seconds, wit
 
 - Event type: `com.mindroom.thread.worktree`
 - State key: the thread's root event ID
-- Payload fields: `path` (relative to the agent's workspace, POSIX separators), `branch` (can be empty), `set_by`, `set_at`
+- Payload fields: `path` (relative to the agent's workspace, POSIX separators), `branch` (can be empty), `set_by` (the name of the agent that made the tie), `set_at`
 - Leaving writes an empty payload (`{}`) for that state key; a thread without a tie has no event or an empty one
 
 ## Install

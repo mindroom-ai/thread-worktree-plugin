@@ -34,7 +34,8 @@ async def _set_thread_workdir(ctx: TurnLifecycleContext) -> None:
             error=repr(exc),
         )
         return
-    if worktree is not None:
+    # The directory is in the workspace of the agent that tied the thread, so only that agent's turns work there.
+    if worktree is not None and worktree.set_by == ctx.envelope.agent_name:
         ctx.set_workdir(worktree.path)
 
 

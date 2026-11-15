@@ -109,12 +109,18 @@ class ThreadWorktreeTools(Toolkit):
         branch = branch.strip()
 
         current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
-        if current is not None and (current.path, current.branch) == (relative, branch):
+        if current is not None and (current.path, current.branch, current.set_by) == (relative, branch, context.agent_name):
             return _payload("ok", action="use", thread_id=thread_id, path=relative, branch=branch, changed=False, note=_NOTE)
 
-        worktree = ThreadWorktree(relative, branch, context.agent_name or context.requester_id, _now_iso())
+        # The tie is one agent's; another agent's tie of this thread is replaced, and the answer says whose it was.
+        worktree = ThreadWorktree(relative, branch, context.agent_name, _now_iso())
         if not await write_thread_worktree(bindings.room_state_putter, room_id, thread_id, worktree):
             return _error("use", "Failed to write the worktree state event.")
+        replaced = (
+            {"replaced": {"path": current.path, "set_by": current.set_by}}
+            if current is not None and current.set_by != context.agent_name
+            else {}
+        )
         return _payload(
             "ok",
             action="use",
@@ -123,6 +129,7 @@ class ThreadWorktreeTools(Toolkit):
             branch=branch,
             changed=True,
             note=_NOTE,
+            **replaced,
         )
 
     async def leave_worktree(self) -> str:

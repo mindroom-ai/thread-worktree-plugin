@@ -82,6 +82,19 @@ async def test_thread_with_worktree_sets_workdir(function: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("function", ["work_in_thread_worktree", "work_in_thread_worktree_after_approval"])
+async def test_another_agents_tie_sets_nothing(function: str) -> None:
+    """The tie belongs to the agent that made it: another agent's turn in the thread stays in its workspace."""
+    ctx = _context()
+    ctx.envelope.agent_name = "reviewer"
+
+    await getattr(_load_hooks_module(), function)(ctx)
+
+    ctx.set_workdir.assert_not_called()
+    ctx.logger.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "content",
     [None, {}, {"path": 5}, {"path": "../outside"}, {"path": "/abs"}, "garbage"],

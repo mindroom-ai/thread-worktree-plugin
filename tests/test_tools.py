@@ -46,13 +46,14 @@ def _load_tools_module() -> ModuleType:
 
 def _tool_context(
     *,
+    agent_name: str = "code",
     thread_id: str | None = THREAD,
     resolved_thread_id: str | None = THREAD,
     room_state_querier: AsyncMock | None = None,
     room_state_putter: AsyncMock | None = None,
 ) -> ToolRuntimeContext:
     return ToolRuntimeContext(
-        agent_name="code",
+        agent_name=agent_name,
         target=MessageTarget(
             room_id=ROOM,
             source_thread_id=thread_id,
@@ -152,6 +153,26 @@ async def test_use_worktree_changed_branch_rewrites(tmp_path: Path) -> None:
 
     assert result["changed"] is True
     assert room.state[_key()]["branch"] == "two"
+    assert "replaced" not in result
+
+
+@pytest.mark.asyncio
+async def test_another_agent_replaces_the_tie_and_is_told_whose(tmp_path: Path) -> None:
+    """A second agent's tie replaces the first, even for the same directory, and the answer names the previous one."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root, agent_name="code"):
+        await tools.use_worktree("worktrees/a", "feat")
+    with room.context(root, agent_name="reviewer"):
+        result = json.loads(await tools.use_worktree("worktrees/a", "feat"))
+
+    assert result["status"] == "ok"
+    assert result["changed"] is True
+    assert result["replaced"] == {"path": "worktrees/a", "set_by": "code"}
+    assert room.state[_key()]["set_by"] == "reviewer"
+    assert room.putter.await_count == 2
 
 
 @pytest.mark.asyncio
