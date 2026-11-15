@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import json
-from contextlib import ExitStack
 import sys
+from contextlib import ExitStack
 from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,10 +100,6 @@ class FakeRoomState:
         return stack
 
 
-def _key(name: str) -> tuple[str, str, str]:
-    return (ROOM, EVENT_TYPE, json.dumps([THREAD, name], separators=(",", ":")))
-
-
 def _key() -> tuple[str, str, str]:
     return (ROOM, EVENT_TYPE, THREAD)
 
@@ -134,6 +130,7 @@ async def test_use_worktree_writes_and_is_idempotent(tmp_path: Path) -> None:
     assert first["changed"] is True
     assert "next turn" in first["note"]
     assert again["changed"] is False
+    assert "next turn" in again["note"]
     content = room.state[_key()]
     assert content["path"] == "worktrees/a"
     assert content["branch"] == "feature-a"
@@ -173,6 +170,36 @@ async def test_absolute_path_inside_workspace_is_stored_relative(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_symlink_inside_workspace_is_stored_as_its_target(tmp_path: Path) -> None:
+    """A link to another directory of the workspace is stored as the target's relative path."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+    (root / "alias").symlink_to(root / "worktrees" / "a")
+
+    with room.context(root):
+        result = json.loads(await tools.use_worktree("alias"))
+
+    assert result["status"] == "ok"
+    assert room.state[_key()]["path"] == "worktrees/a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spelling", ["./worktrees/a", "worktrees/a/"])
+async def test_path_spellings_are_normalized(tmp_path: Path, spelling: str) -> None:
+    """A leading dot-slash or a trailing slash does not change the stored path."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root):
+        result = json.loads(await tools.use_worktree(spelling))
+
+    assert result["status"] == "ok"
+    assert room.state[_key()]["path"] == "worktrees/a"
+
+
+@pytest.mark.asyncio
 async def test_refused_directories_write_nothing(tmp_path: Path) -> None:
     """Missing, file, escaping, outside, link-out and workspace-root paths all error."""
     tools = _load_tools_module().ThreadWorktreeTools()
@@ -196,6 +223,7 @@ async def test_refused_directories_write_nothing(tmp_path: Path) -> None:
         ".",
         "",
         str(root),
+        "a\0b",
     ]
     with room.context(root):
         for candidate in candidates:

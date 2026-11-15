@@ -27,6 +27,9 @@ from .state import (
 )
 
 
+_NOTE = "The directory applies from this thread's next turn."
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -60,9 +63,12 @@ def _resolve_state_access(
 
 def _workspace_relative(root: Path, path: str) -> str | None:
     """Return the POSIX path of an existing subdirectory of the workspace, or None when it is not one."""
-    root = root.resolve()
-    candidate = Path(path)
-    resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    try:
+        root = root.resolve()
+        candidate = Path(path)
+        resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    except (ValueError, OSError):
+        return None
     # Resolving follows every link, so a link that leaves the workspace ends up outside the root.
     if not resolved.is_dir() or not resolved.is_relative_to(root) or resolved == root:
         return None
@@ -104,7 +110,7 @@ class ThreadWorktreeTools(Toolkit):
 
         current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
         if current is not None and (current.path, current.branch) == (relative, branch):
-            return _payload("ok", action="use", thread_id=thread_id, path=relative, branch=branch, changed=False)
+            return _payload("ok", action="use", thread_id=thread_id, path=relative, branch=branch, changed=False, note=_NOTE)
 
         worktree = ThreadWorktree(relative, branch, context.agent_name or context.requester_id, _now_iso())
         if not await write_thread_worktree(bindings.room_state_putter, room_id, thread_id, worktree):
@@ -116,7 +122,7 @@ class ThreadWorktreeTools(Toolkit):
             path=relative,
             branch=branch,
             changed=True,
-            note="The directory applies from this thread's next turn.",
+            note=_NOTE,
         )
 
     async def leave_worktree(self) -> str:

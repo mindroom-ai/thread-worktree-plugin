@@ -80,3 +80,12 @@ async def test_write_and_clear() -> None:
     )
     assert await state.clear_thread_worktree(putter, ROOM, THREAD) is True
     putter.assert_awaited_with(ROOM, "com.mindroom.thread.worktree", THREAD, {})
+
+
+@pytest.mark.asyncio
+async def test_non_string_attribution_reads_empty() -> None:
+    """A set_by or set_at that is not a string reads as an empty string."""
+    content = {"path": "w/a", "set_by": 5, "set_at": ["t"]}
+    result = await state.read_thread_worktree(AsyncMock(return_value=content), ROOM, THREAD)
+    assert result is not None
+    assert (result.set_by, result.set_at) == ("", "")
