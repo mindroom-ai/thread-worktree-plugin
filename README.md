@@ -51,7 +51,7 @@ The toolkit is named `thread_worktree`.
 |------|---------|
 | `use_worktree(path, branch="")` | Tie the current thread to a directory of the workspace, with an optional branch name |
 | `leave_worktree()` | Remove the tie; the thread's turns run in the workspace again |
-| `get_worktree()` | Show the current thread's directory, branch, `set_by` and `set_at`, if it has any |
+| `get_worktree()` | Show the current thread's directory, branch, `set_by` and `set_at`, if it has any, with `exists` (it is an existing directory inside the caller's workspace) and `applies` (it exists and the caller made the tie) |
 
 All three tools are thread-scoped only. They refuse to operate at room level.
 

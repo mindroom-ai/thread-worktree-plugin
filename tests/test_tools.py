@@ -320,8 +320,46 @@ async def test_get_worktree(tmp_path: Path) -> None:
     assert empty["action"] == "get"
     assert empty["thread_id"] == THREAD
     assert "path" not in empty
+    assert "exists" not in empty
     assert found["path"] == "worktrees/a"
     assert found["branch"] == "b"
+    assert found["set_by"] == "code"
+    assert found["exists"] is True
+    assert found["applies"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_worktree_reports_a_removed_directory(tmp_path: Path) -> None:
+    """A tie whose directory is gone neither exists nor applies."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root):
+        await tools.use_worktree("worktrees/a", "b")
+        (root / "worktrees" / "a").rmdir()
+        found = json.loads(await tools.get_worktree())
+
+    assert found["path"] == "worktrees/a"
+    assert found["exists"] is False
+    assert found["applies"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_worktree_reports_another_agents_tie(tmp_path: Path) -> None:
+    """Another agent's tie does not apply to the caller, even when the caller has that directory too."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root, agent_name="code"):
+        await tools.use_worktree("worktrees/a", "b")
+    with room.context(root, agent_name="reviewer"):
+        found = json.loads(await tools.get_worktree())
+
+    assert found["set_by"] == "code"
+    assert found["exists"] is True
+    assert found["applies"] is False
 
 
 @pytest.mark.asyncio

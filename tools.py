@@ -146,15 +146,20 @@ class ThreadWorktreeTools(Toolkit):
         return _payload("ok", action="leave", thread_id=thread_id, changed=True)
 
     async def get_worktree(self) -> str:
-        """Show the worktree directory of the current thread, if it has one."""
+        """Show the worktree directory of the current thread, if it has one.
+
+        `exists` says whether the directory is an existing directory inside your workspace, and `applies` whether your
+        turns in this thread work there: it exists and you made the tie.
+        """
         resolved = _resolve_state_access(action="get", require_putter=False)
         if isinstance(resolved, str):
             return resolved
-        _, room_id, thread_id, bindings = resolved
+        context, room_id, thread_id, bindings = resolved
 
         current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
         if current is None:
             return _payload("ok", action="get", thread_id=thread_id)
+        exists = _workspace_relative(context.agent_workspace_root(), current.path) is not None
         return _payload(
             "ok",
             action="get",
@@ -163,6 +168,8 @@ class ThreadWorktreeTools(Toolkit):
             branch=current.branch,
             set_by=current.set_by,
             set_at=current.set_at,
+            exists=exists,
+            applies=exists and current.set_by == context.agent_name,
         )
 
 
