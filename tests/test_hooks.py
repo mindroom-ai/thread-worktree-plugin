@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from importlib import util
 from pathlib import Path
@@ -115,3 +116,32 @@ async def test_failed_read_logs_one_warning_and_raises_nothing() -> None:
 
     ctx.set_workdir.assert_not_called()
     ctx.logger.warning.assert_called_once()
+    assert ctx.logger.warning.call_args.kwargs == {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread-root",
+        "error": "RuntimeError('boom')",
+    }
+
+
+@pytest.mark.asyncio
+async def test_slow_read_is_cut_off_with_one_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read slower than the hook's own bound ends in one warning, and the turn runs in the workspace."""
+    hooks = _load_hooks_module()
+    monkeypatch.setattr(hooks, "STATE_READ_TIMEOUT_SECONDS", 0.01)
+    never = asyncio.Event()
+
+    async def hang(*_args: object) -> None:
+        await never.wait()
+
+    ctx = _context(query_room_state=AsyncMock(side_effect=hang))
+
+    # The guard only keeps a hook without its own bound from hanging the test.
+    await asyncio.wait_for(hooks.work_in_thread_worktree(ctx), timeout=1)
+
+    ctx.set_workdir.assert_not_called()
+    ctx.logger.warning.assert_called_once()
+    assert ctx.logger.warning.call_args.kwargs == {
+        "room_id": "!room:localhost",
+        "thread_id": "$thread-root",
+        "error": "TimeoutError()",
+    }

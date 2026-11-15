@@ -39,7 +39,7 @@ What is refused:
 - A team's turn ignores the request: a hook cannot give a team a working directory.
 - Outside a thread there is nothing to tie, so the tools refuse and the hooks do nothing.
 
-A failure of a hook never reaches the turn: a failed state read logs one warning and the turn runs in the workspace.
+A failure of a hook never reaches the turn: a state read that fails, or takes longer than 2.5 seconds, logs one warning with the room and the thread, and that turn runs in the workspace. An error response from the homeserver reads as no worktree, with nothing logged.
 
 ## Agent Tools
 
@@ -60,7 +60,7 @@ All three tools are thread-scoped only. They refuse to operate at room level.
 | `thread-worktree-started` | `turn:started` | Run the turn in its thread's worktree |
 | `thread-worktree-resumed` | `turn:resumed` | Run a turn resumed after a tool approval in its thread's worktree |
 
-Both hooks wait at most 3 seconds, because the turn waits for them.
+The turn waits for the hooks, so they bound their state read to 2.5 seconds, within their 3 second timeout. The cost is one state read per threaded turn of every agent, before the turn starts; MindRoom repeats a read that finds nothing through the router account.
 
 ## Storage
 
