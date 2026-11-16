@@ -8,7 +8,7 @@ import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.plugin_api import EnrichmentItem, get_tool_runtime_context, hook
 
@@ -25,7 +25,10 @@ if TYPE_CHECKING:
 
 # Below the hook's 3 second timeout, so a slow read ends in this plugin's warning, not in a failed hook.
 STATE_READ_TIMEOUT_SECONDS = 2.5
+# The same for the read and the write of the hook that ties, below its 5 second timeout.
+TIE_TIMEOUT_SECONDS = 4.0
 
+_TOOLKIT = "thread_worktree"
 _SHELL_TOOL = "run_shell_command"
 # An absolute path as a shell call's command or output names it: plain path characters, after `~`, `$HOME` or the
 # workspace variable when it starts with one. A path below any other variable is not known here.
@@ -98,6 +101,15 @@ async def add_thread_worktree_instruction(
     return None
 
 
+def _has_toolkit(config: Any, agent_name: str) -> bool:  # noqa: ANN401 - MindRoom's config, read by its tool names.
+    """Return whether the agent's tools name this plugin's toolkit, among its own or the defaults it includes."""
+    agent = config.agents.get(agent_name)
+    return agent is not None and (
+        _TOOLKIT in agent.tool_names
+        or (agent.include_default_tools and _TOOLKIT in config.defaults.tool_names)
+    )
+
+
 def _made_worktree(
     text: str, root: Path, access: str, since: float
 ) -> tuple[str, Checkout] | None:
@@ -149,29 +161,34 @@ async def tie_made_worktree(ctx: ToolAfterCallContext) -> None:
     if "worktree" not in text or runtime is None:
         return
     try:
+        # Only an agent with the toolkit is tied: it is the one that can look at the tie and leave it.
+        if not _has_toolkit(ctx.config, ctx.agent_name):
+            return
         made = _made_worktree(
             text,
             runtime.agent_workspace_root(),
             file_access(ctx.config, ctx.agent_name),
             time.time() - ctx.duration_ms / 1000 - _CLOCK_SLACK_SECONDS,
         )
-        # A tie is replaced only by `use_worktree`, never by this hook.
-        if (
-            made is None
-            or await read_thread_worktree(
-                ctx.query_room_state, ctx.room_id, ctx.thread_id
-            )
-            is not None
-        ):
+        if made is None:
             return
         tied, (branch, repo, _) = made
-        worktree = ThreadWorktree(
-            tied, branch, ctx.agent_name, datetime.now(UTC).isoformat(), repo
-        )
-        if not await write_thread_worktree(
-            ctx.put_room_state, ctx.room_id, ctx.thread_id, worktree
-        ):
-            ctx.logger.warning("Failed to tie the made worktree", path=tied)
+        async with asyncio.timeout(TIE_TIMEOUT_SECONDS):
+            # A tie is replaced only by `use_worktree`, never by this hook.
+            if (
+                await read_thread_worktree(
+                    ctx.query_room_state, ctx.room_id, ctx.thread_id
+                )
+                is not None
+            ):
+                return
+            worktree = ThreadWorktree(
+                tied, branch, ctx.agent_name, datetime.now(UTC).isoformat(), repo
+            )
+            if not await write_thread_worktree(
+                ctx.put_room_state, ctx.room_id, ctx.thread_id, worktree
+            ):
+                ctx.logger.warning("Failed to tie the made worktree", path=tied)
     except Exception as exc:  # a hook must never break the turn
         ctx.logger.warning("Failed to tie the made worktree", error=repr(exc))
 

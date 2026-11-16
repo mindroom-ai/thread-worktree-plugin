@@ -40,7 +40,8 @@ After every shell call that says "worktree", in its command or in what it printe
 - a directory the agent may tie (see "What is refused");
 - a linked git worktree: its `.git` is a file that names a git directory ending in `worktrees/<name>`, whose `HEAD` the agent may read;
 - made by this call: that `.git` file was written after the call started;
-- and the thread has no tie yet. The hook never replaces a tie; `use_worktree` does.
+- the thread has no tie yet (the hook never replaces a tie; `use_worktree` does);
+- and the agent's tools name the `thread_worktree` toolkit, its own or the default tools it includes, so that it can look at the tie and leave it.
 
 So the text of a command and its output only says where to look. What is tied is a worktree that exists on disk and is new. The branch comes from the worktree's `HEAD`, and the repository's name from its git directory: `<repo>/.git/worktrees/<name>` for a clone, `.git/modules/<repo>/worktrees/<name>` for a submodule. The plugin reads those two small files as MindRoom reads a file for the agent's own tools (inside the workspace unless the agent's file access is unrestricted) and never runs git.
 
@@ -61,9 +62,9 @@ Not tied by the hook: a worktree named by a relative path or below another varia
 
 ### Outside the workspace
 
-An agent whose [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) is `unrestricted` may tie a directory outside its workspace, which is where the worktrees of a clone outside the workspace usually are. The tie then holds the absolute path, and the instruction names it as it is: ``cd "/srv/worktrees/<name>" &&``. Any other agent is confined to its workspace: the tools and the hook refuse such a directory, read no git file outside the workspace, and a state event that names such a directory, written by hand, gives a confined agent no instruction.
+An agent whose [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) is `unrestricted` may tie a directory outside its workspace, which is where the worktrees of a clone outside the workspace usually are. The tie then holds the absolute path, and the instruction names it as it is: ``cd "/srv/worktrees/<name>" &&``. The path is checked where MindRoom's primary process runs, so this is for an agent whose shell runs there too, not in a worker. Any other agent is confined to its workspace: the tools and the hook refuse such a directory, read no git file outside the workspace, and a state event that names such a directory, written by hand, gives a confined agent no instruction.
 
-The tie belongs to the agent that made it: the directory is in that agent's workspace, so only that agent is told about it, and other agents in the thread are not. A thread has one tie, so `use_worktree` by another agent replaces it (the last one wins), and its answer names the previous `path` and `set_by` under `replaced`. A private agent's path is checked in the workspace of the turn's requester, since each requester has their own. In a thread that several people write in, the tie is recorded under the private agent's name, so every requester's turn of that agent gets the instruction, pointing into that requester's own workspace; tie worktrees in threads one person works in.
+The tie belongs to the agent that made it: the directory is in that agent's workspace, or where its file access reaches, so only that agent is told about it, and other agents in the thread are not. A thread has one tie, so `use_worktree` by another agent replaces it (the last one wins), and its answer names the previous `path` and `set_by` under `replaced`. A private agent's path is checked in the workspace of the turn's requester, since each requester has their own. In a thread that several people write in, the tie is recorded under the private agent's name, so every requester's turn of that agent gets the instruction, pointing into that requester's own workspace; tie worktrees in threads one person works in.
 
 What is refused:
 
@@ -80,7 +81,7 @@ The turn waits for the hook, which bounds its state read to 2.5 seconds within i
 
 A failure never reaches the turn: a read that fails or takes longer than 2.5 seconds logs one warning with the room and the thread, and that turn gets no instruction. An error response from the homeserver reads as no tie, with nothing logged.
 
-The `tie-made-worktree` hook runs after every tool call and returns at once for anything but a shell call that says "worktree". For such a call it checks at most 20 paths on disk, and reads the room's state only when one of them is a new worktree. Its failures are logged as one warning too.
+The `tie-made-worktree` hook runs after every tool call and returns at once for anything but a shell call that says "worktree". For such a call it checks at most 20 paths on disk, and reads the room's state only when one of them is a new worktree. Its failures, and a room that does not answer within 4 seconds, are logged as one warning too. As with any `tool:after_call` hook, MindRoom copies each tool call's arguments and result for it.
 
 ## Agent Tools
 
@@ -126,7 +127,7 @@ plugins:
   - path: plugins/thread-worktree-plugin
 ```
 
-Add `thread_worktree` to the tools list of each agent that should work in worktrees, together with `shell` (to make them and work in them). The hooks work for every agent once the plugin is loaded. There is nothing else to configure.
+Add `thread_worktree` to the tools list of each agent that should work in worktrees, together with `shell` (to make them and work in them). The instruction hook works for every agent once the plugin is loaded, and the hook that ties only for agents with the toolkit. There is nothing else to configure.
 
 Update to the latest commit later with:
 

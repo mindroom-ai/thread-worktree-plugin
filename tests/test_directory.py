@@ -102,9 +102,22 @@ def test_directory_outside_the_workspace_needs_unrestricted_access(
     root, outside = _tree(tmp_path)
     (root / "link").symlink_to(outside)
 
-    for path in (str(outside), "link", "../repo-worktrees/fix"):
+    for path in (str(outside), "link"):
         assert directory.tied_path(root, path, "unrestricted") == outside.as_posix()
         assert directory.tied_path(root, path, "workspace") is None
+
+
+def test_path_with_a_parent_part_is_refused_as_written(tmp_path: Path) -> None:
+    """A `..` part is refused before the filesystem is asked, so it cannot probe what the part before it is."""
+    root, outside = _tree(tmp_path)
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "link").symlink_to(outside)
+
+    for probe in ("plain", "link", "missing"):
+        path = f"{tmp_path}/{probe}/../workspace/worktrees/a"
+        assert directory.tied_path(root, path, "workspace") is None
+    assert directory.tied_path(root, "../repo-worktrees/fix", "unrestricted") is None
+    assert directory.tied_path(root, "worktrees/../worktrees/a", "workspace") is None
 
 
 def test_no_tie_for_what_is_not_a_plain_directory(tmp_path: Path) -> None:

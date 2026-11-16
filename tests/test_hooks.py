@@ -39,8 +39,25 @@ INSTRUCTION = (
 )
 
 
-def _config(file_access: str) -> SimpleNamespace:
-    return SimpleNamespace(agents={}, defaults=SimpleNamespace(file_access=file_access))
+def _config(
+    file_access: str,
+    *,
+    tools: tuple[str, ...] = ("shell", "thread_worktree"),
+    default_tools: tuple[str, ...] = (),
+    include_default_tools: bool = True,
+) -> SimpleNamespace:
+    """Build the parts of MindRoom's config the hooks read, for the agent `coder`."""
+    coder = SimpleNamespace(
+        file_access=None,
+        tool_names=list(tools),
+        include_default_tools=include_default_tools,
+    )
+    return SimpleNamespace(
+        agents={"coder": coder},
+        defaults=SimpleNamespace(
+            file_access=file_access, tool_names=list(default_tools)
+        ),
+    )
 
 
 def _load_hooks_module() -> ModuleType:
@@ -443,6 +460,41 @@ async def test_last_named_new_worktree_wins(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_toolkit_among_the_default_tools_counts(tmp_path: Path) -> None:
+    """An agent that gets the toolkit from the default tools is tied too."""
+    root, made = _dirs(tmp_path)
+    ctx = _call(
+        made,
+        config=_config(
+            "unrestricted", tools=("shell",), default_tools=("thread_worktree",)
+        ),
+    )
+
+    await _tie(ctx, root)
+
+    ctx.put_room_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_slow_room_state_only_warns(tmp_path: Path) -> None:
+    """A read that does not answer in time ends in this plugin's warning, not in a failed hook."""
+    root, made = _dirs(tmp_path)
+
+    async def never(*_args: object) -> None:
+        await asyncio.sleep(60)
+
+    ctx = _call(made, query_room_state=AsyncMock(side_effect=never))
+    module = _load_hooks_module()
+    module.TIE_TIMEOUT_SECONDS = 0.05
+    runtime = SimpleNamespace(agent_workspace_root=lambda: root)
+    with patch.object(module, "get_tool_runtime_context", return_value=runtime):
+        await module.tie_made_worktree(ctx)
+
+    ctx.logger.warning.assert_called_once()
+    ctx.put_room_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_tied_thread_keeps_its_tie(tmp_path: Path) -> None:
     """The hook never replaces a tie, its own agent's or another's; `use_worktree` does that."""
     root, made = _dirs(tmp_path)
@@ -491,13 +543,24 @@ async def test_worktree_made_before_the_call_is_not_tied(tmp_path: Path) -> None
         {"room_id": None},
         {"thread_id": None},
         {"config": _config("workspace")},
+        {"config": _config("unrestricted", tools=("shell",))},
+        {
+            "config": _config(
+                "unrestricted",
+                tools=("shell",),
+                default_tools=("thread_worktree",),
+                include_default_tools=False,
+            )
+        },
+        {"agent_name": "unknown"},
     ],
 )
 async def test_other_calls_tie_nothing(
     tmp_path: Path, overrides: dict[str, Any]
 ) -> None:
     """Another tool or command, a path that is not absolute, a failed or declined call, a call outside a thread,
-    and a worktree outside the workspace of a confined agent all leave the thread as it is."""
+    a worktree outside the workspace of a confined agent, and an agent without the toolkit all leave the thread
+    as it is."""
     root, made = _dirs(tmp_path)
     ctx = _call(made, **overrides)
 

@@ -40,6 +40,10 @@ def tied_path(root: Path, path: str, access: str) -> str | None:
     A directory inside the workspace `root` is named relative to it. One outside is named by its absolute path, and
     only for an agent whose file access is unrestricted. `path` is relative to the root or absolute.
     """
+    # A `..` part is refused as written: resolving it on this side would tell a confined agent whether the part
+    # before it is a link.
+    if ".." in PurePosixPath(path).parts:
+        return None
     try:
         root = root.resolve()
         # Resolving follows every link, so a link that leaves the workspace ends up outside the root.
