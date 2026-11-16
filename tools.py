@@ -78,12 +78,19 @@ def _resolve_state_access(
     """Resolve the active thread scope and room-state bindings."""
     context = get_tool_runtime_context()
     if context is None:
-        return _error(action, "Thread worktree tool context is unavailable in this runtime path.")
+        return _error(
+            action, "Thread worktree tool context is unavailable in this runtime path."
+        )
     if context.resolved_thread_id is None:
         return _error(action, f"An active thread is required to {action} a worktree.")
     bindings = context.hooks
-    if bindings.room_state_querier is None or (require_putter and bindings.room_state_putter is None):
-        return _error(action, "Thread worktree room-state access is unavailable in this runtime path.")
+    if bindings.room_state_querier is None or (
+        require_putter and bindings.room_state_putter is None
+    ):
+        return _error(
+            action,
+            "Thread worktree room-state access is unavailable in this runtime path.",
+        )
     return context, context.room_id, context.resolved_thread_id, bindings
 
 
@@ -92,7 +99,11 @@ def _workspace_relative(root: Path, path: str) -> str | None:
     try:
         root = root.resolve()
         candidate = Path(path)
-        resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        resolved = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (root / candidate).resolve()
+        )
     except (ValueError, OSError):
         return None
     # Resolving follows every link, so a link that leaves the workspace ends up outside the root.
@@ -140,9 +151,14 @@ class ThreadWorktreeTools(Toolkit):
                 f"The branch must have at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /.",
             )
 
-        current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
+        current = await read_thread_worktree(
+            bindings.room_state_querier, room_id, thread_id
+        )
         tie = (relative, branch, context.agent_name)
-        if current is not None and (current.path, current.branch, current.set_by) == tie:
+        if (
+            current is not None
+            and (current.path, current.branch, current.set_by) == tie
+        ):
             return _payload(
                 "ok",
                 action="use",
@@ -155,7 +171,9 @@ class ThreadWorktreeTools(Toolkit):
 
         # The tie is one agent's; another agent's tie of this thread is replaced, and the answer says whose it was.
         worktree = ThreadWorktree(relative, branch, context.agent_name, _now_iso())
-        if not await write_thread_worktree(bindings.room_state_putter, room_id, thread_id, worktree):
+        if not await write_thread_worktree(
+            bindings.room_state_putter, room_id, thread_id, worktree
+        ):
             return _error("use", "Failed to write the worktree state event.")
         replaced = (
             {"replaced": {"path": current.path, "set_by": current.set_by}}
@@ -183,14 +201,24 @@ class ThreadWorktreeTools(Toolkit):
             return resolved
         context, room_id, thread_id, bindings = resolved
 
-        current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
+        current = await read_thread_worktree(
+            bindings.room_state_querier, room_id, thread_id
+        )
         if current is None:
             return _payload("ok", action="leave", thread_id=thread_id, changed=False)
-        if not await clear_thread_worktree(bindings.room_state_putter, room_id, thread_id):
+        if not await clear_thread_worktree(
+            bindings.room_state_putter, room_id, thread_id
+        ):
             return _error("leave", "Failed to clear the worktree state event.")
         # Another agent's tie is cleared too, and the answer says whose it was.
-        cleared = {"cleared_set_by": current.set_by} if current.set_by != context.agent_name else {}
-        return _payload("ok", action="leave", thread_id=thread_id, changed=True, **cleared)
+        cleared = (
+            {"cleared_set_by": current.set_by}
+            if current.set_by != context.agent_name
+            else {}
+        )
+        return _payload(
+            "ok", action="leave", thread_id=thread_id, changed=True, **cleared
+        )
 
     async def get_worktree(self) -> str:
         """Show the worktree directory of the current thread, if it has one.
@@ -203,10 +231,15 @@ class ThreadWorktreeTools(Toolkit):
             return resolved
         context, room_id, thread_id, bindings = resolved
 
-        current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
+        current = await read_thread_worktree(
+            bindings.room_state_querier, room_id, thread_id
+        )
         if current is None:
             return _payload("ok", action="get", thread_id=thread_id)
-        exists = _workspace_relative(context.agent_workspace_root(), current.path) is not None
+        exists = (
+            _workspace_relative(context.agent_workspace_root(), current.path)
+            is not None
+        )
         return _payload(
             "ok",
             action="get",

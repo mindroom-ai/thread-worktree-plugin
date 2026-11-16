@@ -10,7 +10,9 @@ from typing import Any
 
 THREAD_WORKTREE_EVENT_TYPE = "com.mindroom.thread.worktree"
 
-type RoomStateQuerier = Callable[[str, str, str | None], Awaitable[dict[str, Any] | None]]
+type RoomStateQuerier = Callable[
+    [str, str, str | None], Awaitable[dict[str, Any] | None]
+]
 type RoomStatePutter = Callable[[str, str, str, dict[str, Any]], Awaitable[bool]]
 
 
@@ -32,15 +34,25 @@ MAX_BRANCH_LENGTH = 100
 
 def valid_worktree_path(path: object) -> bool:
     """Return whether `path` names a directory inside the workspace that the worktree instruction can quote."""
-    if not isinstance(path, str) or len(path) > MAX_PATH_LENGTH or _PLAIN_PATH.fullmatch(path) is None:
+    if (
+        not isinstance(path, str)
+        or len(path) > MAX_PATH_LENGTH
+        or _PLAIN_PATH.fullmatch(path) is None
+    ):
         return False
     # An empty, `.` or `..` segment, an absolute path or a path without parts names no directory inside the workspace.
-    return path[0] != "/" and all(segment not in {"", ".", ".."} for segment in path.split("/"))
+    return path[0] != "/" and all(
+        segment not in {"", ".", ".."} for segment in path.split("/")
+    )
 
 
 def valid_branch(branch: object) -> bool:
     """Return whether `branch` is empty or holds only plain path characters, at most 100 of them."""
-    return isinstance(branch, str) and len(branch) <= MAX_BRANCH_LENGTH and (not branch or _PLAIN_PATH.fullmatch(branch) is not None)
+    return (
+        isinstance(branch, str)
+        and len(branch) <= MAX_BRANCH_LENGTH
+        and (not branch or _PLAIN_PATH.fullmatch(branch) is not None)
+    )
 
 
 async def read_thread_worktree(
@@ -74,10 +86,17 @@ async def write_thread_worktree(
         room_id,
         THREAD_WORKTREE_EVENT_TYPE,
         thread_id,
-        {"path": worktree.path, "branch": worktree.branch, "set_by": worktree.set_by, "set_at": worktree.set_at},
+        {
+            "path": worktree.path,
+            "branch": worktree.branch,
+            "set_by": worktree.set_by,
+            "set_at": worktree.set_at,
+        },
     )
 
 
-async def clear_thread_worktree(put_room_state: RoomStatePutter, room_id: str, thread_id: str) -> bool:
+async def clear_thread_worktree(
+    put_room_state: RoomStatePutter, room_id: str, thread_id: str
+) -> bool:
     """Clear the thread's worktree by writing an empty payload."""
     return await put_room_state(room_id, THREAD_WORKTREE_EVENT_TYPE, thread_id, {})

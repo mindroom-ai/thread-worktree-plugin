@@ -41,7 +41,9 @@ async def add_thread_worktree_instruction(ctx: SystemEnrichContext) -> None:
     room_id = ctx.envelope.room_id
     try:
         async with asyncio.timeout(STATE_READ_TIMEOUT_SECONDS):
-            worktree = await read_thread_worktree(ctx.query_room_state, room_id, thread_id)
+            worktree = await read_thread_worktree(
+                ctx.query_room_state, room_id, thread_id
+            )
     except Exception as exc:  # a hook must never break the turn
         ctx.logger.warning(
             "Failed to read the thread's worktree; the turn gets no worktree instruction",
@@ -52,7 +54,9 @@ async def add_thread_worktree_instruction(ctx: SystemEnrichContext) -> None:
         return
     # The directory is in the workspace of the agent that tied the thread, so only that agent is told about it.
     if worktree is not None and worktree.set_by == ctx.target_entity_name:
-        ctx.add_instruction("thread_worktree", _worktree_instruction(worktree), cache_policy="stable")
+        ctx.add_instruction(
+            "thread_worktree", _worktree_instruction(worktree), cache_policy="stable"
+        )
 
 
 __all__ = ["add_thread_worktree_instruction"]
