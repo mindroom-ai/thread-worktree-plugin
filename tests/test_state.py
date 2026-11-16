@@ -71,11 +71,37 @@ async def test_missing_branch_reads_empty() -> None:
         {"path": "."},
         {"path": "./"},
         {"path": "./."},
+        {"path": "w/a`b"},
+        {"path": 'w/a"b'},
+        {"path": "w/$HOME"},
+        {"path": "w\\a"},
+        {"path": "w/a\nb"},
     ],
 )
 async def test_invalid_content_reads_none(content: Any) -> None:  # noqa: ANN401
-    """Empty or invalid content, and a path that names the workspace itself, read as no worktree."""
+    """Empty or invalid content, the workspace itself, and a path that could bend an instruction read as no worktree."""
     assert await state.read_thread_worktree(AsyncMock(return_value=content), ROOM, THREAD) is None
+
+
+@pytest.mark.parametrize(
+    ("path", "valid"),
+    [
+        ("worktrees/a", True),
+        ("worktrees/feature-a_1.2", True),
+        ("worktrees/a b", True),
+        ("worktrees/a`b", False),
+        ('worktrees/a"b', False),
+        ("worktrees/$x", False),
+        ("worktrees\\a", False),
+        ("worktrees/a\nb", False),
+        ("../a", False),
+        ("/a", False),
+        (".", False),
+    ],
+)
+def test_valid_worktree_path(path: str, valid: bool) -> None:
+    """The path check the tools share with reading is the one reading applies."""
+    assert state.valid_worktree_path(path) is valid
 
 
 @pytest.mark.asyncio

@@ -10,11 +10,11 @@ from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from mindroom.hooks import HookBindings
+from mindroom.hooks import HookBindings, SystemEnrichContext
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.registry import plugin_module_registrations
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -121,6 +121,8 @@ def test_instructions_make_the_worktree_in_the_workspace() -> None:
     )
     assert 'use_worktree("worktrees/<name>", "<branch>")' in instructions
     assert 'cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&' in instructions
+    assert "system prompt" in instructions
+    assert "run in that directory" not in instructions
     assert "`leave_worktree` before" in instructions
 
 
@@ -142,8 +144,11 @@ async def test_use_worktree_writes_and_is_idempotent(tmp_path: Path) -> None:
     assert first["path"] == "worktrees/a"
     assert first["branch"] == "feature-a"
     assert first["changed"] is True
+    assert "system prompt" in first["note"]
     assert "next turn" in first["note"]
     assert 'cd "$MINDROOM_AGENT_WORKSPACE/worktrees/a" &&' in first["note"]
+    assert "`worktrees/a/`" in first["note"]
+    assert "applies" not in first["note"]
     assert again["changed"] is False
     assert again["note"] == first["note"]
     content = room.state[_key()]
@@ -269,6 +274,25 @@ async def test_refused_directories_write_nothing(tmp_path: Path) -> None:
             assert "existing directory inside your workspace" in result["message"]
             assert "relative to the workspace root" in result["message"]
 
+    assert room.state == {}
+    room.putter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("character", ["`", '"', "$", "\\", "\n"])
+async def test_directory_with_a_forbidden_character_is_refused(tmp_path: Path, character: str) -> None:
+    """An existing directory whose path could bend the worktree instruction is refused and writes nothing."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+    (root / "worktrees" / f"a{character}b").mkdir()
+
+    with room.context(root):
+        result = json.loads(await tools.use_worktree(f"worktrees/a{character}b"))
+
+    assert result["status"] == "error"
+    assert "existing directory inside your workspace" in result["message"]
+    assert "backtick" in result["message"]
     assert room.state == {}
     room.putter.assert_not_awaited()
 
@@ -456,23 +480,28 @@ def _load_hooks_module() -> ModuleType:
     return module
 
 
-def _turn(room: FakeRoomState, agent_name: str) -> SimpleNamespace:
-    """Build the turn context a hook sees for `agent_name` in the thread, reading `room`'s state."""
-    return SimpleNamespace(
+def _turn(room: FakeRoomState, agent_name: str) -> SystemEnrichContext:
+    """Build the context a system:enrich hook sees for `agent_name`'s turn in the thread, reading `room`'s state."""
+    return SystemEnrichContext(
+        event_name="system:enrich",
+        config=SimpleNamespace(),
+        runtime_paths=SimpleNamespace(),
+        correlation_id="correlation",
         envelope=SimpleNamespace(
             room_id=ROOM,
             agent_name=agent_name,
             target=SimpleNamespace(resolved_thread_id=THREAD),
         ),
-        query_room_state=room.querier,
-        set_workdir=Mock(),
+        target_entity_name=agent_name,
+        target_member_names=None,
         logger=MagicMock(),
+        room_state_querier=room.querier,
     )
 
 
 @pytest.mark.asyncio
 async def test_tie_written_by_the_tool_is_what_the_hook_reads(tmp_path: Path) -> None:
-    """A tie the tool writes sets the tying agent's next turn there, not another agent's, until it is left."""
+    """A tie the tool writes reaches the tying agent's next system prompt, not another agent's, until it is left."""
     tools = _load_tools_module().ThreadWorktreeTools()
     hooks = _load_hooks_module()
     room = FakeRoomState()
@@ -481,17 +510,18 @@ async def test_tie_written_by_the_tool_is_what_the_hook_reads(tmp_path: Path) ->
     with room.context(root, agent_name="code"):
         await tools.use_worktree("worktrees/a", "feat")
     tying, other = _turn(room, "code"), _turn(room, "reviewer")
-    await hooks.work_in_thread_worktree(tying)
-    await hooks.work_in_thread_worktree(other)
+    await hooks.add_thread_worktree_instruction(tying)
+    await hooks.add_thread_worktree_instruction(other)
 
-    tying.set_workdir.assert_called_once_with("worktrees/a")
-    other.set_workdir.assert_not_called()
+    assert [(item.key, item.cache_policy) for item in tying._items] == [("thread_worktree", "stable")]
+    assert "`worktrees/a` (branch `feat`)" in tying._items[0].text
+    assert other._items == []
 
     with room.context(root, agent_name="code"):
         await tools.leave_worktree()
     after_leaving = _turn(room, "code")
-    await hooks.work_in_thread_worktree(after_leaving)
+    await hooks.add_thread_worktree_instruction(after_leaving)
 
-    after_leaving.set_workdir.assert_not_called()
+    assert after_leaving._items == []
     for turn in (tying, other, after_leaving):
         turn.logger.warning.assert_not_called()

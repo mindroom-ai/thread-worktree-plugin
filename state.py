@@ -24,8 +24,13 @@ class ThreadWorktree:
     set_at: str
 
 
-def _valid_path(path: object) -> bool:
-    if not isinstance(path, str) or not path:
+# The worktree instruction puts the path in backticks and in a double-quoted shell argument, which these could bend.
+_FORBIDDEN_PATH_CHARACTERS = frozenset('`"$\\\n')
+
+
+def valid_worktree_path(path: object) -> bool:
+    """Return whether `path` names a directory inside the workspace that the worktree instruction can quote."""
+    if not isinstance(path, str) or not path or not _FORBIDDEN_PATH_CHARACTERS.isdisjoint(path):
         return False
     parsed = PurePosixPath(path)
     # A path without parts, such as `.` or `./`, names the workspace itself.
@@ -39,7 +44,7 @@ async def read_thread_worktree(
 ) -> ThreadWorktree | None:
     """Read the thread's worktree, or None when there is none or it is invalid."""
     content = await query_room_state(room_id, THREAD_WORKTREE_EVENT_TYPE, thread_id)
-    if not isinstance(content, Mapping) or not _valid_path(content.get("path")):
+    if not isinstance(content, Mapping) or not valid_worktree_path(content.get("path")):
         return None
     branch = content.get("branch")
     set_by = content.get("set_by")

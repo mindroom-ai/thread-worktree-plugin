@@ -23,6 +23,7 @@ from .state import (
     ThreadWorktree,
     clear_thread_worktree,
     read_thread_worktree,
+    valid_worktree_path,
     write_thread_worktree,
 )
 
@@ -32,20 +33,23 @@ To work on a task in its own git worktree:
 1. Make it with the shell, with absolute paths: \
 `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
 2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace.
-3. From this thread's next turn your tools run in that directory. \
-Until then, start shell commands with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`.
-4. Call `leave_worktree` before you remove the worktree, and do not remove it while one of this thread's tool approvals is waiting."""
+3. From this thread's next turn, your system prompt names the thread's worktree. \
+Until then, and always, start every shell command for this work with \
+`cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths with the prefix `worktrees/<name>/`.
+4. Call `leave_worktree` before you remove the worktree."""
 
 _REFUSAL = (
     "Expected an existing directory inside your workspace, other than the workspace itself, "
-    "given relative to the workspace root, such as `worktrees/<name>` for `$MINDROOM_AGENT_WORKSPACE/worktrees/<name>`."
+    "given relative to the workspace root, such as `worktrees/<name>` for `$MINDROOM_AGENT_WORKSPACE/worktrees/<name>`,"
+    " whose path has no backtick, double quote, `$`, backslash or newline."
 )
 
 
 def _note(path: str) -> str:
     return (
-        "The directory applies from this thread's next turn; until then, start shell commands with "
-        f'`cd "$MINDROOM_AGENT_WORKSPACE/{path}" &&`.'
+        "From this thread's next turn, your system prompt names this worktree. Until then, and always, start every "
+        f'shell command for this work with `cd "$MINDROOM_AGENT_WORKSPACE/{path}" &&`, and give file tools paths with '
+        f"the prefix `{path}/`."
     )
 
 
@@ -109,10 +113,10 @@ class ThreadWorktreeTools(Toolkit):
         )
 
     async def use_worktree(self, path: str, branch: str = "") -> str:
-        """Make your turns in the current thread work in a directory of your workspace, such as a git worktree you made.
+        """Tie the current thread to a directory of your workspace, such as a git worktree you made.
 
-        The directory applies from this thread's next turn; until then, start shell commands with
-        `cd "$MINDROOM_AGENT_WORKSPACE/<path>" &&`. Other agents in the thread keep working in their own workspaces.
+        From this thread's next turn, your system prompt names the directory. Until then, and always, start every shell
+        command for this work with `cd "$MINDROOM_AGENT_WORKSPACE/<path>" &&`. Other agents in the thread are not told.
 
         Args:
             path: An existing directory inside your workspace, relative to the workspace root, such as `worktrees/<name>`.
@@ -124,7 +128,7 @@ class ThreadWorktreeTools(Toolkit):
             return resolved
         context, room_id, thread_id, bindings = resolved
         relative = _workspace_relative(context.agent_workspace_root(), path)
-        if relative is None:
+        if relative is None or not valid_worktree_path(relative):
             return _error("use", _REFUSAL)
         branch = branch.strip()
 
@@ -162,7 +166,7 @@ class ThreadWorktreeTools(Toolkit):
         )
 
     async def leave_worktree(self) -> str:
-        """Stop the current thread from working in a worktree directory; its turns run in the workspace again.
+        """Untie the current thread from its worktree; from its next turn your system prompt no longer names it.
 
         Call it before you remove the worktree.
         """
@@ -183,8 +187,8 @@ class ThreadWorktreeTools(Toolkit):
     async def get_worktree(self) -> str:
         """Show the worktree directory of the current thread, if it has one.
 
-        `exists` says whether the directory is an existing directory inside your workspace, and `applies` whether your
-        turns in this thread work there: it exists and you made the tie.
+        `exists` says whether the directory is an existing directory inside your workspace, and `applies` whether the
+        tie is yours to work in: it exists and you made the tie, so your system prompt names it.
         """
         resolved = _resolve_state_access(action="get", require_putter=False)
         if isinstance(resolved, str):
