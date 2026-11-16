@@ -81,6 +81,7 @@ All three tools are thread-scoped only. They refuse to operate at room level.
 - Event type: `com.mindroom.thread.worktree`
 - State key: the thread's root event ID
 - Payload fields: `path` (relative to the agent's workspace, POSIX separators), `branch` (can be empty), `set_by` (the name of the agent that made the tie), `set_at`
+- `path` holds only `A-Z a-z 0-9 . _ - /` (at most 200 characters, no empty, `.` or `..` segment) and `branch` only `A-Z a-z 0-9 . _ - /` (at most 100 characters); anything else reads as no worktree, or as no branch, because both go into the system prompt
 - Leaving writes an empty payload (`{}`) for that state key; a thread without a tie has no event or an empty one
 
 ## Install

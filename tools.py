@@ -20,9 +20,12 @@ from mindroom.plugin_api import (
 )
 
 from .state import (
+    MAX_BRANCH_LENGTH,
+    MAX_PATH_LENGTH,
     ThreadWorktree,
     clear_thread_worktree,
     read_thread_worktree,
+    valid_branch,
     valid_worktree_path,
     write_thread_worktree,
 )
@@ -41,7 +44,7 @@ Until then, and always, start every shell command for this work with \
 _REFUSAL = (
     "Expected an existing directory inside your workspace, other than the workspace itself, "
     "given relative to the workspace root, such as `worktrees/<name>` for `$MINDROOM_AGENT_WORKSPACE/worktrees/<name>`,"
-    " whose path has no backtick, double quote, `$`, backslash or newline."
+    f" whose path has at most {MAX_PATH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /, and no empty, `.` or `..` segment."
 )
 
 
@@ -131,6 +134,11 @@ class ThreadWorktreeTools(Toolkit):
         if relative is None or not valid_worktree_path(relative):
             return _error("use", _REFUSAL)
         branch = branch.strip()
+        if not valid_branch(branch):
+            return _error(
+                "use",
+                f"The branch must have at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /.",
+            )
 
         current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
         tie = (relative, branch, context.agent_name)

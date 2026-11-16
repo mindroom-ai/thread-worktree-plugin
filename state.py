@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Any
 
 THREAD_WORKTREE_EVENT_TYPE = "com.mindroom.thread.worktree"
@@ -24,17 +24,23 @@ class ThreadWorktree:
     set_at: str
 
 
-# The worktree instruction puts the path in backticks and in a double-quoted shell argument, which these could bend.
-_FORBIDDEN_PATH_CHARACTERS = frozenset('`"$\\\n')
+# Both values go into the agent's system prompt, so they hold only plain path characters and no prose or markup.
+_PLAIN_PATH = re.compile(r"[A-Za-z0-9._/-]+")
+MAX_PATH_LENGTH = 200
+MAX_BRANCH_LENGTH = 100
 
 
 def valid_worktree_path(path: object) -> bool:
     """Return whether `path` names a directory inside the workspace that the worktree instruction can quote."""
-    if not isinstance(path, str) or not path or not _FORBIDDEN_PATH_CHARACTERS.isdisjoint(path):
+    if not isinstance(path, str) or len(path) > MAX_PATH_LENGTH or _PLAIN_PATH.fullmatch(path) is None:
         return False
-    parsed = PurePosixPath(path)
-    # A path without parts, such as `.` or `./`, names the workspace itself.
-    return bool(parsed.parts) and not parsed.is_absolute() and ".." not in parsed.parts
+    # An empty, `.` or `..` segment, an absolute path or a path without parts names no directory inside the workspace.
+    return path[0] != "/" and all(segment not in {"", ".", ".."} for segment in path.split("/"))
+
+
+def valid_branch(branch: object) -> bool:
+    """Return whether `branch` is empty or holds only plain path characters, at most 100 of them."""
+    return isinstance(branch, str) and len(branch) <= MAX_BRANCH_LENGTH and (not branch or _PLAIN_PATH.fullmatch(branch) is not None)
 
 
 async def read_thread_worktree(
@@ -51,7 +57,7 @@ async def read_thread_worktree(
     set_at = content.get("set_at")
     return ThreadWorktree(
         content["path"],
-        branch if isinstance(branch, str) else "",
+        branch if valid_branch(branch) else "",
         set_by if isinstance(set_by, str) else "",
         set_at if isinstance(set_at, str) else "",
     )
