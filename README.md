@@ -13,7 +13,7 @@ One git worktree per thread for the agents of [MindRoom](https://github.com/mind
 
 ## What it does
 
-- Records which git worktree a Matrix thread works in, as room state, when the agent that made the worktree ties the thread to it: the directory, its branch, and its repository's name.
+- Records which git worktree a Matrix thread works in, as room state, when the agent that made the worktree ties the thread to it: the directory, and the branch and repository the agent names.
 - Reminds that agent on every turn in the thread, in its system prompt, where the worktree is and how to work in it.
 - Tells the agent, in the toolkit's instructions, to give a coding task its own worktree before the first change.
 
@@ -34,7 +34,7 @@ The plugin does not make or remove worktrees either; the agent does that with it
 1. The agent makes a worktree with its shell, with absolute paths built from `$MINDROOM_AGENT_WORKSPACE`:
    `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
    Git resolves a relative path against the clone, not the workspace, so a relative `worktrees/<name>` would land inside the clone.
-2. It calls `use_worktree("worktrees/<name>", "<branch>")`, with the path relative to the workspace. The tool checks that the directory exists inside the workspace and writes the state event.
+2. It calls `use_worktree("worktrees/<name>", "<branch>", "<repository>")`, with the path relative to the workspace. The tool checks that the directory exists inside the workspace and writes the state event. The branch and the repository's name are optional, and are stored as given: the plugin reads no file of the worktree and runs no git.
 3. From the thread's next turn, the `thread-worktree-instruction` hook adds this to the agent's system prompt (for `worktrees/<name>` on branch `<branch>`):
 
    > This thread works in the git worktree `worktrees/<name>` (branch `<branch>`), a directory inside your workspace. Start every shell command for this thread's work with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`. For file tools, name files with the prefix `worktrees/<name>/`. If the directory is missing, tell the user and call leave_worktree.
@@ -42,14 +42,11 @@ The plugin does not make or remove worktrees either; the agent does that with it
    Without a branch the instruction leaves out the branch clause. It is the same on every turn of the thread, so it is returned as a required item (`minimal_required`) with the `stable` cache policy. Until the next turn the agent starts its shell commands with that `cd` anyway (the tool's answer says so).
 4. The agent calls `leave_worktree` before it removes the worktree. That clears the event, and the thread's turns get no instruction any more.
 
-### An agent with unrestricted file access
+### Outside the workspace
 
-An agent whose [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) is `unrestricted` gets two things more, because its own tools may read any path the process can:
+An agent whose [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) is `unrestricted` may tie a directory outside its workspace, by its absolute path, which is where the worktrees of a clone outside the workspace are. The tie then holds the absolute path, and the instruction names it as it is: ``cd "/srv/worktrees/<name>" &&``. The path is checked where MindRoom's primary process runs, so this is for an agent whose shell runs there too, not in a worker. For such an agent a state event written by hand can name any directory of the host in the instruction, as its own tools can reach any.
 
-- It may tie a directory outside its workspace, by its absolute path, which is where the worktrees of a clone outside the workspace are. The tie then holds the absolute path, and the instruction names it as it is: ``cd "/srv/worktrees/<name>" &&``. The path is checked where MindRoom's primary process runs, so this is for an agent whose shell runs there too, not in a worker.
-- `use_worktree` reads the worktree's branch and its repository's name from git's own files, without running git: the branch from `HEAD` (when the call gives none), the repository from the git directory, `<repo>/.git/worktrees/<name>` for a clone and `.git/modules/<repo>/worktrees/<name>` for a submodule.
-
-Any other agent is confined to its workspace, and its worker controls every file there. So the plugin opens none of them: the tie has the branch the agent gives and no repository. Its path is taken as written, without a `..` part and without following a link, since following one in the primary process would tell the agent what is outside its workspace. A state event that names a directory outside the workspace, written by hand, gives a confined agent no instruction.
+Any other agent is confined to its workspace, and its worker controls every file there, while this plugin runs in MindRoom's primary process. So a confined agent's path is checked with MindRoom's own walk for such files (`open_directory_within_root`): from the workspace root, part by part, without following a link, so that it says nothing about what is outside the workspace. A directory that a link leads to is therefore refused, also when the link stays inside the workspace. A state event that names a directory outside the workspace, written by hand, gives a confined agent no instruction.
 
 The tie belongs to the agent that made it: the directory is in that agent's workspace, or where its file access reaches, so only that agent is told about it, and other agents in the thread are not. A thread has one tie, so `use_worktree` by another agent replaces it (the last one wins), and its answer names the previous `path` and `set_by` under `replaced`. A private agent's path is checked in the workspace of the turn's requester, since each requester has their own. In a thread that several people write in, the tie is recorded under the private agent's name, so every requester's turn of that agent gets the instruction, pointing into that requester's own workspace; tie worktrees in threads one person works in.
 
@@ -74,7 +71,7 @@ The toolkit is named `thread_worktree`.
 
 | Tool | Purpose |
 |------|---------|
-| `use_worktree(path, branch="")` | Tie the current thread to a directory of the workspace, given relative to the workspace root, with an optional branch name. With unrestricted file access also a directory outside the workspace, by its absolute path, with the branch and the repository's name read from git |
+| `use_worktree(path, branch="", repo="")` | Tie the current thread to a directory of the workspace, given relative to the workspace root, with an optional branch and repository name. With unrestricted file access also a directory outside the workspace, by its absolute path |
 | `leave_worktree()` | Remove the tie. When another agent made it, the answer names that agent under `cleared_set_by` |
 | `get_worktree()` | Show the current thread's directory, branch, repository, `set_by` and `set_at`, if it has any, with `exists` (it is an existing directory the caller may tie) and `applies` (it exists and the caller made the tie) |
 

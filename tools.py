@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 
@@ -18,7 +19,7 @@ from mindroom.plugin_api import (
     register_tool_with_metadata,
 )
 
-from .directory import UNRESTRICTED, checkout, file_access, tied_path
+from .directory import file_access, tied_path
 from .state import (
     MAX_BRANCH_LENGTH,
     MAX_PATH_LENGTH,
@@ -36,7 +37,8 @@ _INSTRUCTIONS = """\
 A coding task gets its own git worktree before the first change, in a thread that has none:
 1. Make it where and how your own instructions say. Without any, use the shell with absolute paths: \
 `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
-2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace.
+2. Call `use_worktree("worktrees/<name>", "<branch>", "<repository>")`; the path is relative to your workspace, or \
+absolute for a worktree outside it, which only an agent with unrestricted file access may tie.
 3. Start every shell command for this work with `cd` into the worktree, such as \
 `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths inside it; \
 from the thread's next turn your system prompt reminds you.
@@ -46,9 +48,10 @@ _REFUSAL = (
     "Expected an existing directory inside your workspace, other than the workspace itself, "
     "given relative to the workspace root, such as `worktrees/<name>` for `$MINDROOM_AGENT_WORKSPACE/worktrees/<name>`,"
     f" whose path has at most {MAX_PATH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /, and no empty, `.` or `..` segment."
-    " Only an agent with unrestricted file access may tie a directory outside its workspace, by its absolute path,"
-    " or one that a link leads to."
+    " With unrestricted file access also an existing directory outside the workspace, given by its absolute path with"
+    " the same characters; without it, no part of the path may be a link."
 )
+_NAME_RULE = f"at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /"
 
 
 def _note(path: str) -> str:
@@ -96,21 +99,15 @@ def _resolve_state_access(
     return context, context.room_id, context.resolved_thread_id, bindings
 
 
-def _tied_path(context: ToolRuntimeContext, path: str) -> str | None:
+async def _tied_path(context: ToolRuntimeContext, path: str) -> str | None:
     """Return how a tie names the directory `path` for the calling agent, or None when it may not tie it."""
-    return tied_path(
+    # Off the event loop: the check asks the filesystem, which can be slow where the path is.
+    return await asyncio.to_thread(
+        tied_path,
         context.agent_workspace_root(),
         path,
         file_access(context.config, context.agent_name),
     )
-
-
-def _checkout(context: ToolRuntimeContext, tied: str) -> tuple[str, str]:
-    """Return the branch and repository git has for a tied directory, for an agent that may read any file."""
-    if file_access(context.config, context.agent_name) != UNRESTRICTED:
-        return "", ""
-    root = context.agent_workspace_root().resolve().as_posix()
-    return checkout(tied if tied.startswith("/") else f"{root}/{tied}")
 
 
 class ThreadWorktreeTools(Toolkit):
@@ -127,7 +124,7 @@ class ThreadWorktreeTools(Toolkit):
             ],
         )
 
-    async def use_worktree(self, path: str, branch: str = "") -> str:
+    async def use_worktree(self, path: str, branch: str = "", repo: str = "") -> str:
         """Tie the current thread to a directory you work in, such as a git worktree you made.
 
         Start shell commands for this work with `cd` into it, as the answer's note says. Other agents in the thread are
@@ -136,8 +133,8 @@ class ThreadWorktreeTools(Toolkit):
         Args:
             path: An existing directory inside your workspace, relative to the workspace root, such as
                 `worktrees/<name>`; with unrestricted file access also one outside it, by its absolute path.
-            branch: The worktree's branch, shown with the thread; optional. With unrestricted file access it is
-                read from the worktree when you give none.
+            branch: The worktree's branch, shown with the thread; optional.
+            repo: The name of the worktree's repository, shown with the branch; optional.
 
         """
         resolved = _resolve_state_access(action="use", require_putter=True)
@@ -150,18 +147,14 @@ class ThreadWorktreeTools(Toolkit):
             path.removeprefix("./").removesuffix("/")
         ):
             return _error("use", _REFUSAL)
-        tied = _tied_path(context, path)
+        tied = await _tied_path(context, path)
         if tied is None:
             return _error("use", _REFUSAL)
-        branch = branch.strip()
+        branch, repo = branch.strip(), repo.strip()
         if not valid_branch(branch):
-            return _error(
-                "use",
-                f"The branch must have at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /.",
-            )
-        # What git says is in the directory: the branch unless one was given, and the repository's name.
-        found_branch, repo = _checkout(context, tied)
-        branch = branch or found_branch
+            return _error("use", f"The branch must have {_NAME_RULE}.")
+        if not valid_branch(repo):
+            return _error("use", f"The repository must have {_NAME_RULE}.")
 
         current = await read_thread_worktree(
             bindings.room_state_querier, room_id, thread_id
@@ -237,7 +230,7 @@ class ThreadWorktreeTools(Toolkit):
     async def get_worktree(self) -> str:
         """Show the worktree directory of the current thread, if it has one.
 
-        `exists` says whether the directory is an existing directory you may work in, and `applies` whether the tie is
+        `exists` says whether the directory is an existing directory you may tie, and `applies` whether the tie is
         yours: you made it and its directory exists.
         """
         resolved = _resolve_state_access(action="get", require_putter=False)
@@ -250,7 +243,7 @@ class ThreadWorktreeTools(Toolkit):
         )
         if current is None:
             return _payload("ok", action="get", thread_id=thread_id)
-        exists = _tied_path(context, current.path) is not None
+        exists = await _tied_path(context, current.path) is not None
         return _payload(
             "ok",
             action="get",
@@ -267,7 +260,9 @@ class ThreadWorktreeTools(Toolkit):
 
 @register_tool_with_metadata(
     name="thread_worktree",
-    file_access=ToolFileAccess.NONE,
+    # `use_worktree` checks a directory the model names, inside the workspace unless the agent's file access is
+    # unrestricted.
+    file_access=ToolFileAccess.AGENT,
     display_name="Thread Worktree",
     description="Tie the current Matrix thread to the git worktree directory the agent works in.",
     category=ToolCategory.DEVELOPMENT,
