@@ -36,6 +36,10 @@ INSTRUCTION = (
 )
 
 
+def _config(file_access: str) -> SimpleNamespace:
+    return SimpleNamespace(agents={}, defaults=SimpleNamespace(file_access=file_access))
+
+
 def _load_hooks_module() -> ModuleType:
     """Load the plugin hooks module under its synthetic package name."""
     hooks_path = Path(__file__).resolve().parents[1] / "hooks.py"
@@ -57,11 +61,12 @@ def _context(
     members: tuple[str, ...] | None = None,
     content: Any = None,  # noqa: ANN401
     querier: AsyncMock | None = None,
+    file_access: str = "workspace",
 ) -> SystemEnrichContext:
     """Build the context MindRoom gives a system:enrich hook for `entity`'s turn in the thread."""
     return SystemEnrichContext(
         event_name="system:enrich",
-        config=SimpleNamespace(),
+        config=_config(file_access),
         runtime_paths=SimpleNamespace(),
         correlation_id="correlation",
         envelope=SimpleNamespace(
@@ -259,3 +264,25 @@ async def test_bad_branch_leaves_out_the_branch_clause(branch: str) -> None:
     assert items[0].text.startswith(
         "This thread works in the git worktree `worktrees/fix`, a directory"
     )
+
+
+ABSOLUTE = {**PAYLOAD, "path": "/srv/repo-worktrees/fix"}
+
+
+@pytest.mark.asyncio
+async def test_tie_outside_the_workspace_names_its_absolute_path() -> None:
+    """An agent with unrestricted file access is sent to the worktree by its absolute path."""
+    items = await _run(_context(content=ABSOLUTE, file_access="unrestricted"))
+
+    assert [item.text for item in items] == [
+        "This thread works in the git worktree `/srv/repo-worktrees/fix` (branch `fix`), a directory outside your "
+        'workspace. Start every shell command for this thread\'s work with `cd "/srv/repo-worktrees/fix" &&`. '
+        "For file tools, name files with the prefix `/srv/repo-worktrees/fix/`. "
+        "If the directory is missing, tell the user and call leave_worktree.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tie_outside_the_workspace_is_not_for_a_confined_agent() -> None:
+    """A workspace-confined agent is never sent outside its workspace, whatever the room state says."""
+    assert await _run(_context(content=ABSOLUTE)) == []

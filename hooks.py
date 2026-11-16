@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.plugin_api import EnrichmentItem, hook
 
-from .state import ThreadWorktree, read_thread_worktree
+from .directory import UNRESTRICTED, file_access
+from .state import ThreadWorktree, read_thread_worktree, shell_path
 
 if TYPE_CHECKING:
     from mindroom.plugin_api import SystemEnrichContext
@@ -21,9 +22,10 @@ def _worktree_instruction(worktree: ThreadWorktree) -> str:
     """Return the instruction that tells the agent where its thread's worktree is and how to work in it."""
     path = worktree.path
     branch = f" (branch `{worktree.branch}`)" if worktree.branch else ""
+    place = "outside" if path.startswith("/") else "inside"
     return (
-        f"This thread works in the git worktree `{path}`{branch}, a directory inside your workspace. "
-        f'Start every shell command for this thread\'s work with `cd "$MINDROOM_AGENT_WORKSPACE/{path}" &&`. '
+        f"This thread works in the git worktree `{path}`{branch}, a directory {place} your workspace. "
+        f'Start every shell command for this thread\'s work with `cd "{shell_path(path)}" &&`. '
         f"For file tools, name files with the prefix `{path}/`. "
         "If the directory is missing, tell the user and call leave_worktree."
     )
@@ -54,8 +56,16 @@ async def add_thread_worktree_instruction(
             error=repr(exc),
         )
         return None
-    # The directory is in the workspace of the agent that tied the thread, so only that agent is told about it.
-    if worktree is not None and worktree.set_by == ctx.target_entity_name:
+    # The directory is in the workspace of the agent that tied the thread, so only that agent is told about it. Room
+    # state is not proof of who wrote it, so only an agent that may leave its workspace is sent outside it.
+    if (
+        worktree is not None
+        and worktree.set_by == ctx.target_entity_name
+        and (
+            not worktree.path.startswith("/")
+            or file_access(ctx.config, ctx.target_entity_name) == UNRESTRICTED
+        )
+    ):
         # Required in minimal mode, where other system items reach the agent only through a document it may not read.
         return EnrichmentItem(
             key="thread_worktree",
