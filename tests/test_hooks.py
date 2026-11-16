@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import time
 from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from mindroom.hooks import EnrichmentItem, SystemEnrichContext
 from mindroom.hooks.decorators import get_hook_metadata
+from test_directory import make_worktree
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -96,7 +99,7 @@ def test_hook_metadata() -> None:
     """The hook enriches the system prompt under its name with a 3 second timeout."""
     module = _load_hooks_module()
     metadata = get_hook_metadata(module.add_thread_worktree_instruction)
-    assert module.__all__ == ["add_thread_worktree_instruction", "tie_created_worktree"]
+    assert module.__all__ == ["add_thread_worktree_instruction", "tie_made_worktree"]
 
     assert metadata is not None
     assert metadata.event_name == "system:enrich"
@@ -288,36 +291,32 @@ async def test_tie_outside_the_workspace_is_not_for_a_confined_agent() -> None:
     assert await _run(_context(content=ABSOLUTE)) == []
 
 
-CREATED_OUTPUT = """\
-→ Creating worktree for branch 'fix-focus'...
-→ Running: git fetch origin
-→ Running: git worktree add -b fix-focus {path} origin/main
-→ Initializing submodules...
-✓ Created worktree at {path}
-"""
-
-
 def _dirs(tmp_path: Path) -> tuple[Path, Path]:
-    """Make a workspace and, outside it, a worktree where `agent-cli dev new` puts one."""
+    """Make a workspace and, outside it, a worktree of the repository `chat` as `git worktree add` leaves one."""
     root = tmp_path / "workspace"
     root.mkdir()
-    created = tmp_path / "chat-worktrees" / "fix-focus"
-    created.mkdir(parents=True)
-    return root, created
+    made = tmp_path / "worktrees" / "chat-focus"
+    make_worktree(
+        made, tmp_path / "chat" / ".git" / "worktrees" / "chat-focus", "fix-focus"
+    )
+    return root, made
 
 
-def _call(created: Path, **overrides: Any) -> SimpleNamespace:  # noqa: ANN401
-    """Build a tool:after_call context for a shell call that ran `agent-cli dev new`."""
+def _call(made: Path, **overrides: Any) -> SimpleNamespace:  # noqa: ANN401
+    """Build a tool:after_call context for a shell call that ran `git worktree add` for `made`."""
     values: dict[str, Any] = {
         "tool_name": "run_shell_command",
-        "arguments": {"args": "cd chat && agent-cli dev new fix-focus --no-setup"},
+        "arguments": {
+            "args": f"git -C chat fetch origin && git -C chat worktree add -b fix-focus {made} origin/main"
+        },
         "agent_name": "coder",
         "config": _config("unrestricted"),
         "room_id": "!room:localhost",
         "thread_id": "$thread-root",
-        "result": CREATED_OUTPUT.format(path=created),
+        "result": "Preparing worktree (new branch 'fix-focus')\nHEAD is now at 1234567 x\n",
         "error": None,
         "blocked": False,
+        "duration_ms": 1500.0,
         "query_room_state": AsyncMock(return_value=None),
         "put_room_state": AsyncMock(return_value=True),
         "logger": MagicMock(),
@@ -333,26 +332,26 @@ async def _tie(ctx: SimpleNamespace, root: Path | None) -> None:
         None if root is None else SimpleNamespace(agent_workspace_root=lambda: root)
     )
     with patch.object(module, "get_tool_runtime_context", return_value=runtime):
-        await module.tie_created_worktree(ctx)
+        await module.tie_made_worktree(ctx)
 
 
 def test_tie_hook_metadata() -> None:
     """The hook runs after tool calls under its name with a 5 second timeout."""
-    metadata = get_hook_metadata(_load_hooks_module().tie_created_worktree)
+    metadata = get_hook_metadata(_load_hooks_module().tie_made_worktree)
 
     assert metadata is not None
     assert metadata.event_name == "tool:after_call"
-    assert metadata.hook_name == "tie-created-worktree"
+    assert metadata.hook_name == "tie-made-worktree"
     assert metadata.timeout_ms == 5000
 
 
 @pytest.mark.asyncio
-async def test_agent_cli_dev_new_ties_the_thread_to_the_created_worktree(
+async def test_git_worktree_add_ties_the_thread_to_the_made_worktree(
     tmp_path: Path,
 ) -> None:
-    """`agent-cli dev new` in the shell tool ties the thread to the worktree its output names."""
-    root, created = _dirs(tmp_path)
-    ctx = _call(created)
+    """A shell call that made a worktree ties its thread to it, with the branch and repository git has for it."""
+    root, made = _dirs(tmp_path)
+    ctx = _call(made)
 
     await _tie(ctx, root)
 
@@ -368,7 +367,7 @@ async def test_agent_cli_dev_new_ties_the_thread_to_the_created_worktree(
     )
     assert content.pop("set_at")
     assert content == {
-        "path": created.as_posix(),
+        "path": made.as_posix(),
         "branch": "fix-focus",
         "set_by": "coder",
         "repo": "chat",
@@ -377,60 +376,78 @@ async def test_agent_cli_dev_new_ties_the_thread_to_the_created_worktree(
 
 
 @pytest.mark.asyncio
-async def test_created_worktree_inside_the_workspace_is_tied_relative(
-    tmp_path: Path,
-) -> None:
-    """A worktree made inside the workspace is tied relative to it, for a confined agent too."""
-    root = tmp_path / "workspace"
-    created = root / "chat-worktrees" / "fix-focus"
-    created.mkdir(parents=True)
+async def test_agent_cli_output_names_the_made_worktree(tmp_path: Path) -> None:
+    """`agent-cli dev new` names the worktree only in what it prints, which is read as the command is."""
+    root, made = _dirs(tmp_path)
     ctx = _call(
-        created,
-        config=_config("workspace"),
-        arguments={"args": ["bash", "-lc", "cd chat && uvx agent-cli dev new"]},
+        made,
+        arguments={"args": ["bash", "-lc", "cd chat && agent-cli dev new fix-focus"]},
+        result=f"→ Creating worktree for branch 'fix-focus'...\n✓ Created worktree at {made}\n",
     )
 
     await _tie(ctx, root)
 
+    assert ctx.put_room_state.await_args.args[3]["path"] == made.as_posix()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        '"$MINDROOM_AGENT_WORKSPACE/wt/focus"',
+        "${MINDROOM_AGENT_WORKSPACE}/wt/focus",
+        "~/wt/focus",
+        "$HOME/wt/focus",
+        '"${HOME}/wt/focus".',
+    ],
+)
+async def test_worktree_inside_the_workspace_is_tied_relative(
+    tmp_path: Path, spelling: str
+) -> None:
+    """A worktree named below the workspace variable or the home directory is found, and tied relative, for a
+    confined agent too."""
+    root = tmp_path / "workspace"
+    make_worktree(
+        root / "wt" / "focus", root / "chat" / ".git" / "worktrees" / "focus", "fix"
+    )
+    ctx = _call(
+        root,
+        config=_config("workspace"),
+        arguments={"args": f"git -C chat worktree add {spelling} -b fix"},
+    )
+
+    with patch.object(Path, "home", return_value=root):
+        await _tie(ctx, root)
+
     content = ctx.put_room_state.await_args.args[3]
     assert (content["path"], content["branch"], content["repo"]) == (
-        "chat-worktrees/fix-focus",
-        "fix-focus",
+        "wt/focus",
+        "fix",
         "chat",
     )
 
 
 @pytest.mark.asyncio
-async def test_last_created_worktree_wins_and_an_odd_branch_is_left_out(
-    tmp_path: Path,
-) -> None:
-    """Of two worktrees one call made, the last is tied; a branch the state cannot hold is left out."""
-    root, created = _dirs(tmp_path)
-    other = tmp_path / "chat-worktrees" / "other"
-    other.mkdir()
-    output = CREATED_OUTPUT.format(path=other) + CREATED_OUTPUT.format(
-        path=created
-    ).replace("'fix-focus'", "'fix#focus'")
-    ctx = _call(created, result=output)
+async def test_last_named_new_worktree_wins(tmp_path: Path) -> None:
+    """Of two worktrees one call made, the one named last is tied."""
+    root, made = _dirs(tmp_path)
+    other = tmp_path / "worktrees" / "chat-other"
+    make_worktree(other, tmp_path / "chat" / ".git" / "worktrees" / "chat-other")
+    ctx = _call(
+        made, arguments={"args": f"git worktree add {other}; git worktree add {made}"}
+    )
 
     await _tie(ctx, root)
 
-    content = ctx.put_room_state.await_args.args[3]
-    assert (content["path"], content["branch"]) == (created.as_posix(), "")
+    assert ctx.put_room_state.await_args.args[3]["path"] == made.as_posix()
 
 
 @pytest.mark.asyncio
-async def test_same_tie_is_not_written_again(tmp_path: Path) -> None:
-    """A thread already tied to that worktree by that agent is left as it is."""
-    root, created = _dirs(tmp_path)
-    current = {
-        "path": created.as_posix(),
-        "branch": "fix-focus",
-        "set_by": "coder",
-        "set_at": "t",
-        "repo": "chat",
-    }
-    ctx = _call(created, query_room_state=AsyncMock(return_value=current))
+async def test_tied_thread_keeps_its_tie(tmp_path: Path) -> None:
+    """The hook never replaces a tie, its own agent's or another's; `use_worktree` does that."""
+    root, made = _dirs(tmp_path)
+    current = {"path": "worktrees/old", "branch": "", "set_by": "other", "set_at": "t"}
+    ctx = _call(made, query_room_state=AsyncMock(return_value=current))
 
     await _tie(ctx, root)
 
@@ -438,14 +455,36 @@ async def test_same_tie_is_not_written_again(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worktree_made_before_the_call_is_not_tied(tmp_path: Path) -> None:
+    """A worktree that existed before the call, which a command such as `git worktree list` names, ties nothing."""
+    root, made = _dirs(tmp_path)
+    before = time.time() - 60
+    os.utime(made / ".git", (before, before))
+    listed = _call(
+        made,
+        arguments={"args": "git worktree list"},
+        result=f"{made} 1234567 [fix-focus]\n",
+    )
+    long_call = _call(made, duration_ms=120_000.0)
+
+    await _tie(listed, root)
+    await _tie(long_call, root)
+
+    listed.put_room_state.assert_not_awaited()
+    listed.query_room_state.assert_not_awaited()
+    # A call that started before the worktree was made, such as one that then installed dependencies, made it.
+    long_call.put_room_state.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "overrides",
     [
         {"tool_name": "save_file"},
-        {"arguments": {"args": "agent-cli dev list"}},
-        {"arguments": {"args": "echo Created worktree at /tmp"}},
-        {"arguments": {}},
-        {"result": "Error: Worktree already exists at /srv/x\n"},
+        {"arguments": {"args": "ls /tmp"}, "result": "x\n"},
+        {"arguments": {"args": "git worktree add ../relative -b fix"}},
+        {"arguments": {"args": "git worktree add $OTHER/worktrees/chat-focus"}},
+        {"arguments": {}, "result": "nothing\n"},
         {"result": None},
         {"error": RuntimeError("boom")},
         {"blocked": True},
@@ -457,10 +496,10 @@ async def test_same_tie_is_not_written_again(tmp_path: Path) -> None:
 async def test_other_calls_tie_nothing(
     tmp_path: Path, overrides: dict[str, Any]
 ) -> None:
-    """Another tool or command, a failed or declined call, a call outside a thread, and a worktree outside the
-    workspace of a confined agent all leave the thread as it is."""
-    root, created = _dirs(tmp_path)
-    ctx = _call(created, **overrides)
+    """Another tool or command, a path that is not absolute, a failed or declined call, a call outside a thread,
+    and a worktree outside the workspace of a confined agent all leave the thread as it is."""
+    root, made = _dirs(tmp_path)
+    ctx = _call(made, **overrides)
 
     await _tie(ctx, root)
 
@@ -469,27 +508,39 @@ async def test_other_calls_tie_nothing(
 
 
 @pytest.mark.asyncio
-async def test_missing_directory_and_missing_call_context_tie_nothing(
-    tmp_path: Path,
-) -> None:
-    """A path that is no directory here, such as a worker's, and a call without a runtime context tie nothing."""
-    root, created = _dirs(tmp_path)
-    gone = _call(tmp_path / "chat-worktrees" / "gone")
-    outside_a_call = _call(created)
+async def test_what_is_no_new_worktree_ties_nothing(tmp_path: Path) -> None:
+    """A plain new directory, a clone, a path cut at a space, a path that is no directory here (a worker's), and a
+    call without a runtime context tie nothing."""
+    root, made = _dirs(tmp_path)
+    plain = tmp_path / "worktrees" / "plain"
+    plain.mkdir()
+    clone = tmp_path / "clone"
+    (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    spaced = tmp_path / "worktrees" / "chat-focus more"
+    calls = [
+        _call(plain, arguments={"args": f"git worktree add {plain}"}),
+        _call(clone, arguments={"args": f"git clone x {clone} # then a worktree"}),
+        _call(spaced, arguments={"args": f"git worktree add '{spaced}'"}),
+        _call(made, arguments={"args": "git worktree add /worker/only/path"}),
+    ]
+    os.utime(made / ".git", (0, 0))
 
-    await _tie(gone, root)
+    for ctx in calls:
+        await _tie(ctx, root)
+    outside_a_call = _call(made)
     await _tie(outside_a_call, None)
 
-    gone.put_room_state.assert_not_awaited()
-    outside_a_call.put_room_state.assert_not_awaited()
+    for ctx in [*calls, outside_a_call]:
+        ctx.put_room_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_failed_write_and_failed_read_only_warn(tmp_path: Path) -> None:
     """A write the room refuses and a read that raises are logged and never break the tool call."""
-    root, created = _dirs(tmp_path)
-    refused = _call(created, put_room_state=AsyncMock(return_value=False))
-    broken = _call(created, query_room_state=AsyncMock(side_effect=RuntimeError("x")))
+    root, made = _dirs(tmp_path)
+    refused = _call(made, put_room_state=AsyncMock(return_value=False))
+    broken = _call(made, query_room_state=AsyncMock(side_effect=RuntimeError("x")))
 
     await _tie(refused, root)
     await _tie(broken, root)
@@ -497,3 +548,22 @@ async def test_failed_write_and_failed_read_only_warn(tmp_path: Path) -> None:
     refused.logger.warning.assert_called_once()
     broken.logger.warning.assert_called_once()
     broken.put_room_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_the_last_paths_of_a_long_output_are_looked_at(
+    tmp_path: Path,
+) -> None:
+    """A call that names very many paths is looked at from its end, a bounded number of them."""
+    root, made = _dirs(tmp_path)
+    noise = "".join(f"/nowhere/{index} worktree\n" for index in range(50))
+    at_the_end = _call(made, result=noise + f"{made}\n")
+    too_early = _call(
+        made, arguments={"args": "git worktree list"}, result=f"{made}\n" + noise
+    )
+
+    await _tie(at_the_end, root)
+    await _tie(too_early, root)
+
+    at_the_end.put_room_state.assert_awaited_once()
+    too_early.put_room_state.assert_not_awaited()

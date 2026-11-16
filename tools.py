@@ -18,7 +18,7 @@ from mindroom.plugin_api import (
     register_tool_with_metadata,
 )
 
-from .directory import repository_of, tied_path, unrestricted
+from .directory import checkout, file_access, tied_path
 from .state import (
     MAX_BRANCH_LENGTH,
     MAX_PATH_LENGTH,
@@ -34,14 +34,12 @@ from .state import (
 
 _INSTRUCTIONS = """\
 A coding task gets its own git worktree before the first change, in a thread that has none:
-1. Where `agent-cli` is installed, run `agent-cli dev new <branch>` in the clone of the repository the task is about. \
-It branches from the fetched default branch, fills submodules from the clone, installs dependencies, and ties this \
-thread to the new worktree by itself. Give the call a `timeout` long enough for the install, or add `--no-setup` to \
-skip it.
-2. Anywhere else, make it with the shell, with absolute paths: \
-`git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`, \
-then call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace. `use_worktree` also \
-ties a worktree that exists already.
+1. Make it where and how your own instructions say. Without any, use the shell with absolute paths: \
+`git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>` \
+(`agent-cli dev new <branch>`, where it is installed, also fills submodules and installs dependencies).
+2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace. A thread without a \
+worktree is tied to a new one by itself when the command names its absolute path, and the call then answers \
+`changed: false`.
 3. Start every shell command for this work with `cd` into the worktree, such as \
 `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths inside it; \
 from the thread's next turn your system prompt reminds you.
@@ -105,7 +103,7 @@ def _tied_path(context: ToolRuntimeContext, path: str) -> str | None:
     return tied_path(
         context.agent_workspace_root(),
         path,
-        outside=unrestricted(context.config, context.agent_name),
+        file_access(context.config, context.agent_name),
     )
 
 
@@ -123,18 +121,16 @@ class ThreadWorktreeTools(Toolkit):
             ],
         )
 
-    async def use_worktree(self, path: str, branch: str = "", repo: str = "") -> str:
-        """Tie the current thread to a directory of your workspace, such as a git worktree you made.
+    async def use_worktree(self, path: str, branch: str = "") -> str:
+        """Tie the current thread to a directory you work in, such as a git worktree you made.
 
-        Start shell commands for this work with `cd "$MINDROOM_AGENT_WORKSPACE/<path>" &&`. Other agents in the thread
-        are not told.
+        Start shell commands for this work with `cd` into it, as the answer's note says. Other agents in the thread are
+        not told. A thread's earlier tie is replaced.
 
         Args:
             path: An existing directory inside your workspace, relative to the workspace root, such as
                 `worktrees/<name>`; with unrestricted file access also one outside it, by its absolute path.
-            branch: The worktree's branch, shown with the thread; optional.
-            repo: The repository's name, shown with the branch; optional, and known without it for a worktree at
-                `<repo>-worktrees/<name>`.
+            branch: The worktree's branch, shown with the thread; optional, and read from the worktree without it.
 
         """
         resolved = _resolve_state_access(action="use", require_putter=True)
@@ -156,12 +152,14 @@ class ThreadWorktreeTools(Toolkit):
                 "use",
                 f"The branch must have at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /.",
             )
-        repo = repo.strip() or repository_of(tied)
-        if not valid_branch(repo):
-            return _error(
-                "use",
-                f"The repository must have at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /.",
-            )
+        # What git says is in the directory: the branch unless one was given, and the repository's name.
+        found = checkout(
+            context.agent_workspace_root(),
+            tied,
+            file_access(context.config, context.agent_name),
+        )
+        branch = branch or (found.branch if found is not None else "")
+        repo = found.repo if found is not None else ""
 
         current = await read_thread_worktree(
             bindings.room_state_querier, room_id, thread_id

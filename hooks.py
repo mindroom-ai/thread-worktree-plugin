@@ -5,17 +5,18 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.plugin_api import EnrichmentItem, get_tool_runtime_context, hook
 
-from .directory import repository_of, tied_path, unrestricted
+from .directory import UNRESTRICTED, Checkout, checkout, file_access, tied_path
 from .state import (
     ThreadWorktree,
     read_thread_worktree,
     shell_path,
-    valid_branch,
     write_thread_worktree,
 )
 
@@ -26,10 +27,17 @@ if TYPE_CHECKING:
 STATE_READ_TIMEOUT_SECONDS = 2.5
 
 _SHELL_TOOL = "run_shell_command"
-# `agent-cli dev new`, also as `ag dev new` or through `uvx`, and the two lines of its output that name what it made.
-_CREATE_COMMAND = "dev new"
-_CREATED_PATH = re.compile(r"Created worktree at (\S+)")
-_CREATED_BRANCH = re.compile(r"Creating worktree for branch '([^']*)'")
+# An absolute path as a shell call's command or output names it: plain path characters, after `~`, `$HOME` or the
+# workspace variable when it starts with one. A path below any other variable is not known here.
+_PATH = re.compile(
+    r"(?<![\w.~$}/-])"
+    r"(~|\$HOME|\$\{HOME\}|\$MINDROOM_AGENT_WORKSPACE|\$\{MINDROOM_AGENT_WORKSPACE\})?"
+    r"(/[A-Za-z0-9._/-]+)"
+)
+# How many of the paths a call names are looked at, from the last one back.
+_MAX_PATHS = 20
+# A worktree counts as made by a call when its `.git` file is no older than the call's start, less this.
+_CLOCK_SLACK_SECONDS = 5.0
 
 
 def _worktree_instruction(worktree: ThreadWorktree) -> str:
@@ -77,7 +85,7 @@ async def add_thread_worktree_instruction(
         and worktree.set_by == ctx.target_entity_name
         and (
             not worktree.path.startswith("/")
-            or unrestricted(ctx.config, ctx.target_entity_name)
+            or file_access(ctx.config, ctx.target_entity_name) == UNRESTRICTED
         )
     ):
         # Required in minimal mode, where other system items reach the agent only through a document it may not read.
@@ -90,69 +98,82 @@ async def add_thread_worktree_instruction(
     return None
 
 
-def _created_worktree(ctx: ToolAfterCallContext) -> tuple[str, str] | None:
-    """Return the path and branch of the worktree a shell call's `agent-cli dev new` made: the last, if several."""
-    if ctx.tool_name != _SHELL_TOOL:
-        return None
-    command = ctx.arguments.get("args")
-    if isinstance(command, list):
-        command = " ".join(str(part) for part in command)
-    if not isinstance(command, str) or _CREATE_COMMAND not in command:
-        return None
-    output = str(ctx.result)
-    paths = _CREATED_PATH.findall(output)
-    if not paths:
-        return None
-    branches = _CREATED_BRANCH.findall(output)
-    branch = branches[-1] if branches else ""
-    return paths[-1], branch if valid_branch(branch) else ""
+def _made_worktree(
+    text: str, root: Path, access: str, since: float
+) -> tuple[str, Checkout] | None:
+    """Return the tie's path and the checkout of a worktree that `text` names and that was made after `since`.
+
+    The text only says where to look: what is tied is a directory the agent may tie that holds a git worktree whose
+    `.git` file was written after `since`. Of several, the one named last.
+    """
+    seen: list[str] = []
+    for prefix, rest in reversed(_PATH.findall(text)):
+        start = (
+            ""
+            if not prefix
+            else str(root)
+            if "WORKSPACE" in prefix
+            else str(Path.home())
+        )
+        path = (start + rest).rstrip(".")
+        if path in seen:
+            continue
+        if len(seen) == _MAX_PATHS:
+            break
+        seen.append(path)
+        tied = tied_path(root, path, access)
+        made = None if tied is None else checkout(root, tied, access)
+        if made is not None and made.made_at is not None and made.made_at >= since:
+            return tied, made
+    return None
 
 
-@hook(event="tool:after_call", name="tie-created-worktree", timeout_ms=5000)
-async def tie_created_worktree(ctx: ToolAfterCallContext) -> None:
-    """Tie the thread a shell call ran in to the worktree its `agent-cli dev new` made."""
+@hook(event="tool:after_call", name="tie-made-worktree", timeout_ms=5000)
+async def tie_made_worktree(ctx: ToolAfterCallContext) -> None:
+    """Tie a thread that has no worktree to the git worktree a shell call in it made."""
     if (
-        ctx.error is not None
+        ctx.tool_name != _SHELL_TOOL
+        or ctx.error is not None
         or ctx.blocked
         or ctx.result is None
         or ctx.room_id is None
         or ctx.thread_id is None
     ):
         return
-    created = _created_worktree(ctx)
+    command = ctx.arguments.get("args")
+    if isinstance(command, list):
+        command = " ".join(str(part) for part in command)
+    text = f"{command}\n{ctx.result}"
+    # `git worktree add` and `agent-cli dev new` both say "worktree", in the command or in what they print.
     runtime = get_tool_runtime_context()
-    if created is None or runtime is None:
+    if "worktree" not in text or runtime is None:
         return
-    path, branch = created
     try:
-        # The path is the shell's, so one that is no directory here, such as a worker's, ties nothing.
-        tied = tied_path(
+        made = _made_worktree(
+            text,
             runtime.agent_workspace_root(),
-            path,
-            outside=unrestricted(ctx.config, ctx.agent_name),
+            file_access(ctx.config, ctx.agent_name),
+            time.time() - ctx.duration_ms / 1000 - _CLOCK_SLACK_SECONDS,
         )
-        if tied is None:
+        # A tie is replaced only by `use_worktree`, never by this hook.
+        if (
+            made is None
+            or await read_thread_worktree(
+                ctx.query_room_state, ctx.room_id, ctx.thread_id
+            )
+            is not None
+        ):
             return
-        repo = repository_of(tied)
-        current = await read_thread_worktree(
-            ctx.query_room_state, ctx.room_id, ctx.thread_id
-        )
-        if current is not None and (
-            current.path,
-            current.branch,
-            current.repo,
-            current.set_by,
-        ) == (tied, branch, repo, ctx.agent_name):
-            return
+        tied, (branch, repo, _) = made
         worktree = ThreadWorktree(
             tied, branch, ctx.agent_name, datetime.now(UTC).isoformat(), repo
         )
         if not await write_thread_worktree(
             ctx.put_room_state, ctx.room_id, ctx.thread_id, worktree
         ):
-            ctx.logger.warning("Failed to tie the created worktree", path=tied)
+            ctx.logger.warning("Failed to tie the made worktree", path=tied)
     except Exception as exc:  # a hook must never break the turn
-        ctx.logger.warning("Failed to tie the created worktree", error=repr(exc))
+        ctx.logger.warning("Failed to tie the made worktree", error=repr(exc))
 
 
-__all__ = ["add_thread_worktree_instruction", "tie_created_worktree"]
+__all__ = ["add_thread_worktree_instruction", "tie_made_worktree"]
