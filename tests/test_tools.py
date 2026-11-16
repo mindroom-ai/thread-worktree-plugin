@@ -10,7 +10,7 @@ from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import uuid4
 
 import pytest
@@ -395,3 +395,83 @@ async def test_every_tool_errors_outside_a_thread(tmp_path: Path) -> None:
     assert [result["status"] for result in results] == ["error"] * 3
     assert room.state == {}
     room.putter.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "resolved_thread_id"),
+    [
+        (None, "$new-root"),
+        ("$a", "$b"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_tools_use_the_resolved_thread(tmp_path: Path, thread_id: str | None, resolved_thread_id: str) -> None:
+    """The resolved thread root is the thread, also for the message that starts a thread."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root, thread_id=thread_id, resolved_thread_id=resolved_thread_id):
+        used = json.loads(await tools.use_worktree("worktrees/a", "feat"))
+        found = json.loads(await tools.get_worktree())
+        left = json.loads(await tools.leave_worktree())
+
+    assert [used["status"], found["status"], left["status"]] == ["ok"] * 3
+    assert [used["thread_id"], found["thread_id"], left["thread_id"]] == [resolved_thread_id] * 3
+    assert found["path"] == "worktrees/a"
+    assert left["changed"] is True
+    assert room.state == {(ROOM, EVENT_TYPE, resolved_thread_id): {}}
+
+
+def _load_hooks_module() -> ModuleType:
+    """Load the plugin hooks module under its synthetic package name."""
+    hooks_path = Path(__file__).resolve().parents[1] / "hooks.py"
+    module_name = f"{PACKAGE_NAME}.hooks_test_{uuid4().hex}"
+    spec = util.spec_from_file_location(module_name, hooks_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _turn(room: FakeRoomState, agent_name: str) -> SimpleNamespace:
+    """Build the turn context a hook sees for `agent_name` in the thread, reading `room`'s state."""
+    return SimpleNamespace(
+        envelope=SimpleNamespace(
+            room_id=ROOM,
+            agent_name=agent_name,
+            target=SimpleNamespace(resolved_thread_id=THREAD),
+        ),
+        query_room_state=room.querier,
+        set_workdir=Mock(),
+        logger=MagicMock(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_tie_written_by_the_tool_is_what_the_hook_reads(tmp_path: Path) -> None:
+    """A tie the tool writes sets the tying agent's next turn there, not another agent's, until it is left."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    hooks = _load_hooks_module()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root, agent_name="code"):
+        await tools.use_worktree("worktrees/a", "feat")
+    tying, other = _turn(room, "code"), _turn(room, "reviewer")
+    await hooks.work_in_thread_worktree(tying)
+    await hooks.work_in_thread_worktree(other)
+
+    tying.set_workdir.assert_called_once_with("worktrees/a")
+    other.set_workdir.assert_not_called()
+
+    with room.context(root, agent_name="code"):
+        await tools.leave_worktree()
+    after_leaving = _turn(room, "code")
+    await hooks.work_in_thread_worktree(after_leaving)
+
+    after_leaving.set_workdir.assert_not_called()
+    for turn in (tying, other, after_leaving):
+        turn.logger.warning.assert_not_called()
