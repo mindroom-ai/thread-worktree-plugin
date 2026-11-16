@@ -17,8 +17,7 @@ jobs:
   compatibility:
     permissions:
       contents: read
-    # Pin the first MindRoom release tag that has plugin API 1.31 once one exists.
-    uses: mindroom-ai/mindroom/.github/workflows/plugin-ci.yml@main
+    uses: mindroom-ai/mindroom/.github/workflows/plugin-ci.yml@v2026.11.330
     with:
       plugin_repository: ${{ github.repository }}
       plugin_ref: ${{ github.sha }}
