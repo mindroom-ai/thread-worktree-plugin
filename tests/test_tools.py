@@ -138,13 +138,11 @@ def _workspace(tmp_path: Path) -> Path:
 
 
 def test_instructions_ask_for_a_worktree_before_the_first_change() -> None:
-    """The instructions give a coding task its own worktree first, and say that a new one may tie itself."""
+    """The instructions give a coding task its own worktree first, made the way the agent's instructions say."""
     instructions = _load_tools_module().ThreadWorktreeTools().instructions
 
     assert "before the first change" in instructions
     assert "how your own instructions say" in instructions
-    assert "tied to a new one by itself" in instructions
-    assert "`changed: false`" in instructions
 
 
 def test_instructions_make_the_worktree_in_the_workspace() -> None:
@@ -272,7 +270,7 @@ async def test_outside_tie_does_not_apply_to_a_confined_agent(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_branch_and_repo_are_read_from_the_worktree(tmp_path: Path) -> None:
-    """Without a branch the worktree's own is stored, with its repository; a given branch is kept as given."""
+    """With unrestricted file access the worktree's own branch and repository are stored; a given branch is kept."""
     tools = _load_tools_module().ThreadWorktreeTools()
     room = FakeRoomState()
     root = _workspace(tmp_path)
@@ -280,7 +278,7 @@ async def test_branch_and_repo_are_read_from_the_worktree(tmp_path: Path) -> Non
         root / "worktrees" / "b", root / "chat" / ".git" / "worktrees" / "b", "fix/b"
     )
 
-    with room.context(root):
+    with room.context(root, file_access="unrestricted"):
         read = json.loads(await tools.use_worktree("worktrees/b"))
         again = json.loads(await tools.use_worktree("worktrees/b", "fix/b"))
         given = json.loads(await tools.use_worktree("worktrees/b", "other"))
@@ -289,6 +287,28 @@ async def test_branch_and_repo_are_read_from_the_worktree(tmp_path: Path) -> Non
     assert again["changed"] is False
     assert (given["branch"], given["repo"], given["changed"]) == ("other", "chat", True)
     assert room.state[_key()]["repo"] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_confined_agents_worktree_files_are_not_read(tmp_path: Path) -> None:
+    """For a confined agent no file of the worktree is opened: the branch is the one given, and no repository."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+    make_worktree(
+        root / "worktrees" / "b", root / "chat" / ".git" / "worktrees" / "b", "fix/b"
+    )
+
+    with (
+        room.context(root),
+        patch.object(Path, "open", side_effect=AssertionError("opened a file")),
+        patch("os.open", side_effect=AssertionError("opened a file")),
+    ):
+        silent = json.loads(await tools.use_worktree("worktrees/b"))
+        given = json.loads(await tools.use_worktree("worktrees/b", "fix/b"))
+
+    assert (silent["status"], silent["branch"], silent["repo"]) == ("ok", "", "")
+    assert (given["branch"], given["repo"]) == ("fix/b", "")
 
 
 @pytest.mark.asyncio
@@ -344,17 +364,27 @@ async def test_absolute_path_inside_workspace_is_stored_relative(
 
 
 @pytest.mark.asyncio
-async def test_symlink_inside_workspace_is_stored_as_its_target(tmp_path: Path) -> None:
-    """A link to another directory of the workspace is stored as the target's relative path."""
+async def test_symlink_is_followed_only_with_unrestricted_access(
+    tmp_path: Path,
+) -> None:
+    """A link to another directory of the workspace is refused for a confined agent, whose path is taken as
+    written, and stored as the target's relative path for an agent that may read any path."""
     tools = _load_tools_module().ThreadWorktreeTools()
     room = FakeRoomState()
     root = _workspace(tmp_path)
     (root / "alias").symlink_to(root / "worktrees" / "a")
 
     with room.context(root):
+        confined = json.loads(await tools.use_worktree("alias"))
+    assert confined["status"] == "error"
+    assert "a link leads to" in confined["message"]
+    assert room.state == {}
+
+    with room.context(root, file_access="unrestricted"):
         result = json.loads(await tools.use_worktree("alias"))
 
     assert result["status"] == "ok"
+    assert result["path"] == "worktrees/a"
     assert room.state[_key()]["path"] == "worktrees/a"
 
 

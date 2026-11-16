@@ -18,7 +18,7 @@ from mindroom.plugin_api import (
     register_tool_with_metadata,
 )
 
-from .directory import checkout, file_access, tied_path
+from .directory import UNRESTRICTED, checkout, file_access, tied_path
 from .state import (
     MAX_BRANCH_LENGTH,
     MAX_PATH_LENGTH,
@@ -35,11 +35,8 @@ from .state import (
 _INSTRUCTIONS = """\
 A coding task gets its own git worktree before the first change, in a thread that has none:
 1. Make it where and how your own instructions say. Without any, use the shell with absolute paths: \
-`git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>` \
-(`agent-cli dev new <branch>`, where it is installed, also fills submodules and installs dependencies).
-2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace. A thread without a \
-worktree is tied to a new one by itself when the command names its absolute path, and the call then answers \
-`changed: false`.
+`git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
+2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace.
 3. Start every shell command for this work with `cd` into the worktree, such as \
 `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths inside it; \
 from the thread's next turn your system prompt reminds you.
@@ -49,7 +46,8 @@ _REFUSAL = (
     "Expected an existing directory inside your workspace, other than the workspace itself, "
     "given relative to the workspace root, such as `worktrees/<name>` for `$MINDROOM_AGENT_WORKSPACE/worktrees/<name>`,"
     f" whose path has at most {MAX_PATH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /, and no empty, `.` or `..` segment."
-    " Only an agent with unrestricted file access may tie a directory outside its workspace, by its absolute path."
+    " Only an agent with unrestricted file access may tie a directory outside its workspace, by its absolute path,"
+    " or one that a link leads to."
 )
 
 
@@ -107,6 +105,14 @@ def _tied_path(context: ToolRuntimeContext, path: str) -> str | None:
     )
 
 
+def _checkout(context: ToolRuntimeContext, tied: str) -> tuple[str, str]:
+    """Return the branch and repository git has for a tied directory, for an agent that may read any file."""
+    if file_access(context.config, context.agent_name) != UNRESTRICTED:
+        return "", ""
+    root = context.agent_workspace_root().resolve().as_posix()
+    return checkout(tied if tied.startswith("/") else f"{root}/{tied}")
+
+
 class ThreadWorktreeTools(Toolkit):
     """Toolkit for tying a Matrix thread to a directory the agent works in."""
 
@@ -130,7 +136,8 @@ class ThreadWorktreeTools(Toolkit):
         Args:
             path: An existing directory inside your workspace, relative to the workspace root, such as
                 `worktrees/<name>`; with unrestricted file access also one outside it, by its absolute path.
-            branch: The worktree's branch, shown with the thread; optional, and read from the worktree without it.
+            branch: The worktree's branch, shown with the thread; optional. With unrestricted file access it is
+                read from the worktree when you give none.
 
         """
         resolved = _resolve_state_access(action="use", require_putter=True)
@@ -153,13 +160,8 @@ class ThreadWorktreeTools(Toolkit):
                 f"The branch must have at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /.",
             )
         # What git says is in the directory: the branch unless one was given, and the repository's name.
-        found = checkout(
-            context.agent_workspace_root(),
-            tied,
-            file_access(context.config, context.agent_name),
-        )
-        branch = branch or (found.branch if found is not None else "")
-        repo = found.repo if found is not None else ""
+        found_branch, repo = _checkout(context, tied)
+        branch = branch or found_branch
 
         current = await read_thread_worktree(
             bindings.room_state_querier, room_id, thread_id

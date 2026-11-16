@@ -4,43 +4,18 @@
 from __future__ import annotations
 
 import asyncio
-import re
-import time
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from mindroom.plugin_api import EnrichmentItem, get_tool_runtime_context, hook
+from mindroom.plugin_api import EnrichmentItem, hook
 
-from .directory import UNRESTRICTED, Checkout, checkout, file_access, tied_path
-from .state import (
-    ThreadWorktree,
-    read_thread_worktree,
-    shell_path,
-    write_thread_worktree,
-)
+from .directory import UNRESTRICTED, file_access
+from .state import ThreadWorktree, read_thread_worktree, shell_path
 
 if TYPE_CHECKING:
-    from mindroom.plugin_api import SystemEnrichContext, ToolAfterCallContext
+    from mindroom.plugin_api import SystemEnrichContext
 
 # Below the hook's 3 second timeout, so a slow read ends in this plugin's warning, not in a failed hook.
 STATE_READ_TIMEOUT_SECONDS = 2.5
-# The same for the read and the write of the hook that ties, below its 5 second timeout.
-TIE_TIMEOUT_SECONDS = 4.0
-
-_TOOLKIT = "thread_worktree"
-_SHELL_TOOL = "run_shell_command"
-# An absolute path as a shell call's command or output names it: plain path characters, after `~`, `$HOME` or the
-# workspace variable when it starts with one. A path below any other variable is not known here.
-_PATH = re.compile(
-    r"(?<![\w.~$}/-])"
-    r"(~|\$HOME|\$\{HOME\}|\$MINDROOM_AGENT_WORKSPACE|\$\{MINDROOM_AGENT_WORKSPACE\})?"
-    r"(/[A-Za-z0-9._/-]+)"
-)
-# How many of the paths a call names are looked at, from the last one back.
-_MAX_PATHS = 20
-# A worktree counts as made by a call when its `.git` file is no older than the call's start, less this.
-_CLOCK_SLACK_SECONDS = 5.0
 
 
 def _worktree_instruction(worktree: ThreadWorktree) -> str:
@@ -101,96 +76,4 @@ async def add_thread_worktree_instruction(
     return None
 
 
-def _has_toolkit(config: Any, agent_name: str) -> bool:  # noqa: ANN401 - MindRoom's config, read by its tool names.
-    """Return whether the agent's tools name this plugin's toolkit, among its own or the defaults it includes."""
-    agent = config.agents.get(agent_name)
-    return agent is not None and (
-        _TOOLKIT in agent.tool_names
-        or (agent.include_default_tools and _TOOLKIT in config.defaults.tool_names)
-    )
-
-
-def _made_worktree(
-    text: str, root: Path, access: str, since: float
-) -> tuple[str, Checkout] | None:
-    """Return the tie's path and the checkout of a worktree that `text` names and that was made after `since`.
-
-    The text only says where to look: what is tied is a directory the agent may tie that holds a git worktree whose
-    `.git` file was written after `since`. Of several, the one named last.
-    """
-    seen: list[str] = []
-    for prefix, rest in reversed(_PATH.findall(text)):
-        start = (
-            ""
-            if not prefix
-            else str(root)
-            if "WORKSPACE" in prefix
-            else str(Path.home())
-        )
-        path = (start + rest).rstrip(".")
-        if path in seen:
-            continue
-        if len(seen) == _MAX_PATHS:
-            break
-        seen.append(path)
-        tied = tied_path(root, path, access)
-        made = None if tied is None else checkout(root, tied, access)
-        if made is not None and made.made_at is not None and made.made_at >= since:
-            return tied, made
-    return None
-
-
-@hook(event="tool:after_call", name="tie-made-worktree", timeout_ms=5000)
-async def tie_made_worktree(ctx: ToolAfterCallContext) -> None:
-    """Tie a thread that has no worktree to the git worktree a shell call in it made."""
-    if (
-        ctx.tool_name != _SHELL_TOOL
-        or ctx.error is not None
-        or ctx.blocked
-        or ctx.result is None
-        or ctx.room_id is None
-        or ctx.thread_id is None
-    ):
-        return
-    command = ctx.arguments.get("args")
-    if isinstance(command, list):
-        command = " ".join(str(part) for part in command)
-    text = f"{command}\n{ctx.result}"
-    # `git worktree add` and `agent-cli dev new` both say "worktree", in the command or in what they print.
-    runtime = get_tool_runtime_context()
-    if "worktree" not in text or runtime is None:
-        return
-    try:
-        # Only an agent with the toolkit is tied: it is the one that can look at the tie and leave it.
-        if not _has_toolkit(ctx.config, ctx.agent_name):
-            return
-        made = _made_worktree(
-            text,
-            runtime.agent_workspace_root(),
-            file_access(ctx.config, ctx.agent_name),
-            time.time() - ctx.duration_ms / 1000 - _CLOCK_SLACK_SECONDS,
-        )
-        if made is None:
-            return
-        tied, (branch, repo, _) = made
-        async with asyncio.timeout(TIE_TIMEOUT_SECONDS):
-            # A tie is replaced only by `use_worktree`, never by this hook.
-            if (
-                await read_thread_worktree(
-                    ctx.query_room_state, ctx.room_id, ctx.thread_id
-                )
-                is not None
-            ):
-                return
-            worktree = ThreadWorktree(
-                tied, branch, ctx.agent_name, datetime.now(UTC).isoformat(), repo
-            )
-            if not await write_thread_worktree(
-                ctx.put_room_state, ctx.room_id, ctx.thread_id, worktree
-            ):
-                ctx.logger.warning("Failed to tie the made worktree", path=tied)
-    except Exception as exc:  # a hook must never break the turn
-        ctx.logger.warning("Failed to tie the made worktree", error=repr(exc))
-
-
-__all__ = ["add_thread_worktree_instruction", "tie_made_worktree"]
+__all__ = ["add_thread_worktree_instruction"]

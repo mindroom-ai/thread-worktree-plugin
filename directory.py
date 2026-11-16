@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path, PurePosixPath
-from typing import Any, NamedTuple
+from typing import Any
 
 from mindroom.plugin_api import resolve_agent_file
 
@@ -18,15 +18,6 @@ _BRANCH = "ref: refs/heads/"
 _MAX_LINE_BYTES = 1024
 
 
-class Checkout(NamedTuple):
-    """The git checkout in a directory: its branch and its repository's name, each empty when unknown."""
-
-    branch: str
-    repo: str
-    # When `git worktree add` made it, which is when it wrote the worktree's `.git` file; None for any other checkout.
-    made_at: float | None
-
-
 def file_access(config: Any, agent_name: str) -> str:  # noqa: ANN401 - MindRoom's config, read by two attributes.
     """Return the agent's `file_access`, `workspace` or `unrestricted`: its own setting, else the default."""
     agent = config.agents.get(agent_name)
@@ -37,43 +28,50 @@ def file_access(config: Any, agent_name: str) -> str:  # noqa: ANN401 - MindRoom
 def tied_path(root: Path, path: str, access: str) -> str | None:
     """Return how a tie names the existing directory `path`, or None when it may not be tied.
 
-    A directory inside the workspace `root` is named relative to it. One outside is named by its absolute path, and
-    only for an agent whose file access is unrestricted. `path` is relative to the root or absolute.
+    `path` is relative to the workspace `root` or absolute. A directory inside the workspace is named relative to
+    it. One outside is named by its absolute path, and only for an agent whose file access is unrestricted.
+
+    This runs in MindRoom's primary process, and a confined agent's worker controls every file of its workspace. So
+    for a confined agent the path is taken as written: it must be inside the workspace without a `..` part, and no
+    part of it may be a link, because following a link here would tell the agent what its target is.
     """
-    # A `..` part is refused as written: resolving it on this side would tell a confined agent whether the part
-    # before it is a link.
-    if ".." in PurePosixPath(path).parts:
-        return None
     try:
         root = root.resolve()
-        # Resolving follows every link, so a link that leaves the workspace ends up outside the root.
-        resolved = (root / path).resolve()
+        if access == UNRESTRICTED:
+            # Resolving follows every link, which an agent that may read any path may do.
+            resolved = (root / path).resolve()
+            relative = (
+                resolved.relative_to(root) if resolved.is_relative_to(root) else None
+            )
+        else:
+            written = PurePosixPath(os.path.normpath(root / path))
+            if ".." in PurePosixPath(path).parts or not written.is_relative_to(root):
+                return None
+            relative = written.relative_to(root)
+            # A path without links is its own resolution; nothing below is asked of the filesystem otherwise.
+            resolved = Path(written)
+            if resolved.resolve() != resolved:
+                return None
         if not resolved.is_dir() or resolved == root:
             return None
-    except (ValueError, OSError):
+    except (
+        ValueError,
+        OSError,
+        RuntimeError,
+    ):  # RuntimeError: a link loop, before Python 3.13
         return None
-    if resolved.is_relative_to(root):
-        tied = resolved.relative_to(root).as_posix()
-    elif access == UNRESTRICTED:
-        tied = resolved.as_posix()
-    else:
-        return None
+    tied = resolved.as_posix() if relative is None else relative.as_posix()
     return tied if valid_worktree_path(tied) else None
 
 
-def _first_line(path: str, root: Path, access: str) -> tuple[str, float] | None:
-    """Return the first line and the modification time of the file at `path`, or None when the agent may not read it.
-
-    MindRoom opens it as it opens a file for the agent's own tools: inside the workspace unless the agent's file
-    access is unrestricted, without following a link out of it and without waiting on a pipe.
-    """
+def _first_line(path: str) -> str | None:
+    """Return the first line of the small regular file at `path`, or None when there is none to read."""
     try:
         authorized = resolve_agent_file(
-            path, workspace_root=root, file_access=access, field_name="path"
+            path, workspace_root=None, file_access=UNRESTRICTED, field_name="path"
         )
         with authorized.open() as file:
-            line = file.readline(_MAX_LINE_BYTES).decode().strip()
-            return line, os.fstat(file.fileno()).st_mtime
+            return file.readline(_MAX_LINE_BYTES).decode().strip()
     except (ValueError, OSError):
         return None
 
@@ -88,30 +86,23 @@ def _repository(gitdir: PurePosixPath) -> str:
     return parts[-1] if len(parts) > 1 else ""
 
 
-def checkout(root: Path, tied: str, access: str) -> Checkout | None:
-    """Return the git checkout in a tied directory, or None when it holds none that the agent may read.
+def checkout(directory: str) -> tuple[str, str]:
+    """Return the branch and the repository's name of the git checkout in `directory`, each empty when unknown.
 
-    Only the checkout's `.git` file and its `HEAD` are read; git is not run.
+    Only for an agent with unrestricted file access, whose own tools may read these files too: the checkout's `.git`
+    file and its `HEAD` are read, and git is not run. `directory` is absolute.
     """
-    directory = tied if tied.startswith("/") else f"{root.resolve().as_posix()}/{tied}"
-    link = _first_line(f"{directory}/.git", root, access)
-    made_at = None
-    if link is not None and link[0].startswith(_GITDIR):
+    link = _first_line(f"{directory}/.git")
+    if link is not None and link.startswith(_GITDIR):
         # A worktree's and a submodule's `.git` is a file that names the git directory, absolute or relative to it.
         gitdir = PurePosixPath(
-            os.path.normpath(os.path.join(directory, link[0].removeprefix(_GITDIR)))
+            os.path.normpath(os.path.join(directory, link.removeprefix(_GITDIR)))
         )
-        if len(gitdir.parts) > 2 and gitdir.parts[-2] == "worktrees":
-            made_at = link[1]
     else:
         gitdir = PurePosixPath(directory, ".git")
-    head = _first_line(f"{gitdir}/HEAD", root, access)
+    head = _first_line(f"{gitdir}/HEAD")
     if head is None:
-        return None
-    branch = head[0].removeprefix(_BRANCH) if head[0].startswith(_BRANCH) else ""
+        return "", ""
+    branch = head.removeprefix(_BRANCH) if head.startswith(_BRANCH) else ""
     repo = _repository(gitdir)
-    return Checkout(
-        branch if valid_branch(branch) else "",
-        repo if valid_branch(repo) else "",
-        made_at,
-    )
+    return branch if valid_branch(branch) else "", repo if valid_branch(repo) else ""
