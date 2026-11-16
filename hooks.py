@@ -1,5 +1,5 @@
 # ruff: noqa: INP001
-"""Hook entrypoints for the MindRoom thread-worktree plugin."""
+"""Hook entrypoint for the MindRoom thread-worktree plugin."""
 
 from __future__ import annotations
 

@@ -271,6 +271,48 @@ async def test_outside_tie_does_not_apply_to_a_confined_agent(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_hand_written_absolute_tie_inside_the_workspace_does_not_apply(
+    tmp_path: Path,
+) -> None:
+    """A tie written by hand as an absolute path gives a confined agent no instruction, so it does not apply."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+    room.state[_key()] = {
+        "path": (root / "worktrees" / "a").as_posix(),
+        "branch": "",
+        "set_by": "code",
+        "set_at": "t",
+    }
+
+    with room.context(root):
+        shown = json.loads(await tools.get_worktree())
+
+    assert (shown["exists"], shown["applies"]) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_invalid_names_are_refused_before_the_directory_is_checked(
+    tmp_path: Path,
+) -> None:
+    """A branch or repository that is no plain name is refused without asking the filesystem."""
+    module = _load_tools_module()
+    tools = module.ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with (
+        room.context(root),
+        patch.object(module, "tied_path", side_effect=AssertionError("checked")),
+    ):
+        branch = json.loads(await tools.use_worktree("worktrees/a", "a b"))
+        repo = json.loads(await tools.use_worktree("worktrees/a", "fix", "a b"))
+
+    assert (branch["status"], repo["status"]) == ("error", "error")
+    assert room.state == {}
+
+
+@pytest.mark.asyncio
 async def test_repo_is_stored_as_given_and_a_changed_one_is_a_change(
     tmp_path: Path,
 ) -> None:

@@ -48,8 +48,9 @@ _REFUSAL = (
     "Expected an existing directory inside your workspace, other than the workspace itself, "
     "given relative to the workspace root, such as `worktrees/<name>` for `$MINDROOM_AGENT_WORKSPACE/worktrees/<name>`,"
     f" whose path has at most {MAX_PATH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /, and no empty, `.` or `..` segment."
-    " With unrestricted file access also an existing directory outside the workspace, given by its absolute path with"
-    " the same characters; without it, no part of the path may be a link."
+    " With unrestricted file access also an existing directory outside the workspace, given by its absolute path,"
+    " whose resolved form has the same characters; without it, no part of the path may be a link, and MindRoom must"
+    " be allowed to read the directory."
 )
 _NAME_RULE = f"at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /"
 
@@ -101,12 +102,10 @@ def _resolve_state_access(
 
 async def _tied_path(context: ToolRuntimeContext, path: str) -> str | None:
     """Return how a tie names the directory `path` for the calling agent, or None when it may not tie it."""
-    # Off the event loop: the check asks the filesystem, which can be slow where the path is.
+    access = file_access(context.config, context.agent_name)
+    # Off the event loop: finding the workspace and checking the path both ask the filesystem, which can be slow.
     return await asyncio.to_thread(
-        tied_path,
-        context.agent_workspace_root(),
-        path,
-        file_access(context.config, context.agent_name),
+        lambda: tied_path(context.agent_workspace_root(), path, access)
     )
 
 
@@ -134,15 +133,20 @@ class ThreadWorktreeTools(Toolkit):
             path: An existing directory inside your workspace, relative to the workspace root, such as
                 `worktrees/<name>`; with unrestricted file access also one outside it, by its absolute path.
             branch: The worktree's branch, shown with the thread; optional.
-            repo: The name of the worktree's repository, shown with the branch; optional.
+            repo: The name of the worktree's repository, shown before the branch in a room that works on several;
+                optional. Spell one repository the same way in every thread, such as its clone's name.
 
         """
         resolved = _resolve_state_access(action="use", require_putter=True)
         if isinstance(resolved, str):
             return resolved
         context, room_id, thread_id, bindings = resolved
-        # A relative path is checked as the state checks it before the filesystem is touched; an absolute one only
-        # becomes relative once it is resolved.
+        branch, repo = branch.strip(), repo.strip()
+        if not valid_branch(branch):
+            return _error("use", f"The branch must have {_NAME_RULE}.")
+        if not valid_branch(repo):
+            return _error("use", f"The repository must have {_NAME_RULE}.")
+        # A relative path is checked as the state checks it before the filesystem is touched.
         if not path.startswith("/") and not valid_worktree_path(
             path.removeprefix("./").removesuffix("/")
         ):
@@ -150,11 +154,6 @@ class ThreadWorktreeTools(Toolkit):
         tied = await _tied_path(context, path)
         if tied is None:
             return _error("use", _REFUSAL)
-        branch, repo = branch.strip(), repo.strip()
-        if not valid_branch(branch):
-            return _error("use", f"The branch must have {_NAME_RULE}.")
-        if not valid_branch(repo):
-            return _error("use", f"The repository must have {_NAME_RULE}.")
 
         current = await read_thread_worktree(
             bindings.room_state_querier, room_id, thread_id
@@ -243,7 +242,8 @@ class ThreadWorktreeTools(Toolkit):
         )
         if current is None:
             return _payload("ok", action="get", thread_id=thread_id)
-        exists = await _tied_path(context, current.path) is not None
+        # The tie's own spelling: a path written by hand that only resolves to a directory is not one the hook uses.
+        exists = await _tied_path(context, current.path) == current.path
         return _payload(
             "ok",
             action="get",

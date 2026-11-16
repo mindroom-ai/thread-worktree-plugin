@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 import threading
 from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -155,20 +157,21 @@ def test_confined_agents_directory_swapped_for_a_link_is_never_followed(
 
 
 def test_workspace_root_may_be_below_a_link_but_not_be_one(tmp_path: Path) -> None:
-    """A workspace reached through a link above it works, also by an absolute path in either spelling; a root that
-    is itself a link is not followed for a confined agent."""
+    """A workspace reached through a link above it works, also by an absolute path that starts with the root as it
+    is spelled; a root that is itself a link is not followed for a confined agent."""
     root, _ = _tree(tmp_path)
     (tmp_path / "alias").symlink_to(tmp_path)
     below = tmp_path / "alias" / "workspace"
     (tmp_path / "root-link").symlink_to(root)
 
     for access in ("workspace", "unrestricted"):
-        for path in (
-            "worktrees/a",
-            f"{below}/worktrees/a",
-            f"{root}/worktrees/a",
-        ):
+        for path in ("worktrees/a", f"{below}/worktrees/a"):
             assert directory.tied_path(below, path, access) == "worktrees/a", path
+    # Another spelling of the root is not looked up for a confined agent; resolving finds it for any other.
+    assert directory.tied_path(below, f"{root}/worktrees/a", "workspace") is None
+    assert directory.tied_path(below, f"{root}/worktrees/a", "unrestricted") == (
+        "worktrees/a"
+    )
     assert (
         directory.tied_path(tmp_path / "root-link", "worktrees/a", "workspace") is None
     )
@@ -176,6 +179,37 @@ def test_workspace_root_may_be_below_a_link_but_not_be_one(tmp_path: Path) -> No
         directory.tied_path(tmp_path / "root-link", "worktrees/a", "unrestricted")
         == "worktrees/a"
     )
+
+
+def test_confined_agents_path_is_checked_as_text_before_it_is_walked(
+    tmp_path: Path,
+) -> None:
+    """A path the tie could not hold is refused without opening any directory."""
+    root, _ = _tree(tmp_path)
+    (root / "a b").mkdir()
+    long = "/".join(["d"] * 150)
+
+    with patch.object(
+        directory, "open_directory_within_root", side_effect=AssertionError("walked")
+    ):
+        for path in ("a b", long, f"{root}/a b", "../x", str(tmp_path), ""):
+            assert directory.tied_path(root, path, "workspace") is None, path
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root may open any directory")
+def test_confined_agents_directory_must_be_readable(tmp_path: Path) -> None:
+    """The walk opens the directory, so one MindRoom may enter but not read is refused for a confined agent."""
+    root, _ = _tree(tmp_path)
+    closed = root / "worktrees" / "closed"
+    closed.mkdir(mode=0o311)
+    try:
+        assert directory.tied_path(root, "worktrees/closed", "workspace") is None
+        assert (
+            directory.tied_path(root, "worktrees/closed", "unrestricted")
+            == "worktrees/closed"
+        )
+    finally:
+        closed.chmod(0o755)
 
 
 def test_no_tie_for_what_is_not_a_plain_directory(tmp_path: Path) -> None:
