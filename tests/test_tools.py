@@ -111,6 +111,19 @@ def _workspace(tmp_path: Path) -> Path:
     return root
 
 
+def test_instructions_make_the_worktree_in_the_workspace() -> None:
+    """The instructions build the worktree from the workspace variable and tie it by its workspace-relative path."""
+    instructions = _load_tools_module().ThreadWorktreeTools().instructions
+
+    assert (
+        'git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>'
+        in instructions
+    )
+    assert 'use_worktree("worktrees/<name>", "<branch>")' in instructions
+    assert 'cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&' in instructions
+    assert "`leave_worktree` before" in instructions
+
+
 @pytest.mark.asyncio
 async def test_use_worktree_writes_and_is_idempotent(tmp_path: Path) -> None:
     """Setting a directory writes it once; the same call again writes nothing."""
@@ -130,8 +143,9 @@ async def test_use_worktree_writes_and_is_idempotent(tmp_path: Path) -> None:
     assert first["branch"] == "feature-a"
     assert first["changed"] is True
     assert "next turn" in first["note"]
+    assert 'cd "$MINDROOM_AGENT_WORKSPACE/worktrees/a" &&' in first["note"]
     assert again["changed"] is False
-    assert "next turn" in again["note"]
+    assert again["note"] == first["note"]
     content = room.state[_key()]
     assert content["path"] == "worktrees/a"
     assert content["branch"] == "feature-a"
@@ -252,6 +266,8 @@ async def test_refused_directories_write_nothing(tmp_path: Path) -> None:
             assert result["status"] == "error", candidate
             assert result["tool"] == "thread_worktree"
             assert result["action"] == "use"
+            assert "existing directory inside your workspace" in result["message"]
+            assert "relative to the workspace root" in result["message"]
 
     assert room.state == {}
     room.putter.assert_not_awaited()

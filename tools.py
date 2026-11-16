@@ -27,7 +27,26 @@ from .state import (
 )
 
 
-_NOTE = "The directory applies from this thread's next turn."
+_INSTRUCTIONS = """\
+To work on a task in its own git worktree:
+1. Make it with the shell, with absolute paths: \
+`git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
+2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace.
+3. From this thread's next turn your tools run in that directory. \
+Until then, start shell commands with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`.
+4. Call `leave_worktree` before you remove the worktree."""
+
+_REFUSAL = (
+    "Expected an existing directory inside your workspace, other than the workspace itself, "
+    "given relative to the workspace root, such as `worktrees/<name>` for `$MINDROOM_AGENT_WORKSPACE/worktrees/<name>`."
+)
+
+
+def _note(path: str) -> str:
+    return (
+        "The directory applies from this thread's next turn; until then, start shell commands with "
+        f'`cd "$MINDROOM_AGENT_WORKSPACE/{path}" &&`.'
+    )
 
 
 def _now_iso() -> str:
@@ -81,12 +100,7 @@ class ThreadWorktreeTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="thread_worktree",
-            instructions=(
-                "To work on a task in its own git worktree, first make it with the shell: "
-                "`git -C <clone> worktree add <path inside your workspace> -b <branch>`. "
-                "Then call `use_worktree(path, branch)`. From this thread's next turn your tools run in that directory. "
-                "Call `leave_worktree` when the work is merged."
-            ),
+            instructions=_INSTRUCTIONS,
             tools=[
                 self.use_worktree,
                 self.leave_worktree,
@@ -95,9 +109,15 @@ class ThreadWorktreeTools(Toolkit):
         )
 
     async def use_worktree(self, path: str, branch: str = "") -> str:
-        """Make the current thread work in a directory of your workspace, such as a git worktree you created.
+        """Make your turns in the current thread work in a directory of your workspace, such as a git worktree you made.
 
-        The directory applies from the thread's next turn.
+        The directory applies from this thread's next turn; until then, start shell commands with
+        `cd "$MINDROOM_AGENT_WORKSPACE/<path>" &&`. Other agents in the thread keep working in their own workspaces.
+
+        Args:
+            path: An existing directory inside your workspace, relative to the workspace root, such as `worktrees/<name>`.
+            branch: The worktree's branch, shown with the thread; optional.
+
         """
         resolved = _resolve_state_access(action="use", require_putter=True)
         if isinstance(resolved, str):
@@ -105,12 +125,21 @@ class ThreadWorktreeTools(Toolkit):
         context, room_id, thread_id, bindings = resolved
         relative = _workspace_relative(context.agent_workspace_root(), path)
         if relative is None:
-            return _error("use", "Expected an existing directory inside your workspace, other than the workspace itself.")
+            return _error("use", _REFUSAL)
         branch = branch.strip()
 
         current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
-        if current is not None and (current.path, current.branch, current.set_by) == (relative, branch, context.agent_name):
-            return _payload("ok", action="use", thread_id=thread_id, path=relative, branch=branch, changed=False, note=_NOTE)
+        tie = (relative, branch, context.agent_name)
+        if current is not None and (current.path, current.branch, current.set_by) == tie:
+            return _payload(
+                "ok",
+                action="use",
+                thread_id=thread_id,
+                path=relative,
+                branch=branch,
+                changed=False,
+                note=_note(relative),
+            )
 
         # The tie is one agent's; another agent's tie of this thread is replaced, and the answer says whose it was.
         worktree = ThreadWorktree(relative, branch, context.agent_name, _now_iso())
@@ -128,12 +157,15 @@ class ThreadWorktreeTools(Toolkit):
             path=relative,
             branch=branch,
             changed=True,
-            note=_NOTE,
+            note=_note(relative),
             **replaced,
         )
 
     async def leave_worktree(self) -> str:
-        """Stop the current thread from working in a worktree directory; its turns run in the workspace again."""
+        """Stop the current thread from working in a worktree directory; its turns run in the workspace again.
+
+        Call it before you remove the worktree.
+        """
         resolved = _resolve_state_access(action="leave", require_putter=True)
         if isinstance(resolved, str):
             return resolved
