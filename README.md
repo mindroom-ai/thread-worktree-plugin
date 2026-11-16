@@ -15,7 +15,8 @@ One git worktree per thread for the agents of [MindRoom](https://github.com/mind
 
 - Records which git worktree a Matrix thread works in, as room state, when the agent that made the worktree ties the thread to it.
 - Reminds that agent on every turn in the thread, in its system prompt, where the worktree is and how to work in it.
-- Lets MindRoom Chat show the branch on the thread's card through the pull request client plugin ([`mindroom-ai/pull-request-client-plugin`](https://github.com/mindroom-ai/pull-request-client-plugin)).
+
+The pull request client plugin of MindRoom Chat ([`mindroom-ai/pull-request-client-plugin`](https://github.com/mindroom-ai/pull-request-client-plugin)) shows the branch on the thread's card once its thread branch support is released.
 
 So several threads can work on different branches of the same repository without touching each other.
 
@@ -37,24 +38,23 @@ The plugin does not make or remove worktrees either; the agent does that with it
 
    > This thread works in the git worktree `worktrees/<name>` (branch `<branch>`), a directory inside your workspace. Start every shell command for this thread's work with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`. For file tools, name files with the prefix `worktrees/<name>/`. If the directory is missing, tell the user and call leave_worktree.
 
-   Without a branch the instruction leaves out the branch clause. It is the same on every turn of the thread, so it is added with the `stable` cache policy. Until the next turn, and always, the agent starts its shell commands with that `cd` (the tool's answer says so).
+   Without a branch the instruction leaves out the branch clause. It is the same on every turn of the thread, so it is returned as a required item (`minimal_required`) with the `stable` cache policy. Until the next turn the agent starts its shell commands with that `cd` anyway (the tool's answer says so).
 4. The agent calls `leave_worktree` before it removes the worktree. That clears the event, and the thread's turns get no instruction any more.
 
-The tie belongs to the agent that made it: the directory is in that agent's workspace, so only that agent is told about it, and other agents in the thread are not. A thread has one tie, so `use_worktree` by another agent replaces it (the last one wins), and its answer names the previous `path` and `set_by` under `replaced`. A private agent's path is checked in the workspace of the turn's requester, since each requester has their own.
+The tie belongs to the agent that made it: the directory is in that agent's workspace, so only that agent is told about it, and other agents in the thread are not. A thread has one tie, so `use_worktree` by another agent replaces it (the last one wins), and its answer names the previous `path` and `set_by` under `replaced`. A private agent's path is checked in the workspace of the turn's requester, since each requester has their own. In a thread that several people write in, the tie is recorded under the private agent's name, so every requester's turn of that agent gets the instruction, pointing into that requester's own workspace; tie worktrees in threads one person works in.
 
 What is refused:
 
-- `use_worktree` refuses a path that is not an existing directory inside the agent's workspace, the workspace itself, a path that leaves the workspace through a link, and a path with a backtick, a double quote, `$`, a backslash or a newline, which could bend the instruction. A state event with such a path, written by hand, reads as no tie.
+- `use_worktree` refuses a path that is not an existing directory inside the agent's workspace, the workspace itself, a path that leaves the workspace through a link, and a path with a backtick, a double quote, `$`, a backslash or a newline, which could bend the instruction. A state event with such a path, or one that breaks the length or segment rules, written by hand, reads as no tie; a hand-written path that is valid text is taken as it is, because the hook does not look at the filesystem, which is why the instruction tells the agent what to do when the directory is missing.
 - `use_worktree` checks the directory in the workspace as MindRoom's primary process sees it. A static runner that does not mount the agents' storage makes the worktree in its own copy of the workspace, which the primary cannot see, so `use_worktree` refuses it.
 - Writing the tie needs the right to send that state event in the room. When the agent's account lacks it, MindRoom retries through the router account; if that fails too, the tool answers an error.
-- The hook does not check that the directory still exists; the instruction tells the agent what to do when it is gone.
 - A team's turn gets no instruction, and outside a thread there is nothing to tie, so the tools refuse and the hook does nothing.
 
-In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), MindRoom gives system enrichment, this instruction included, to the agent through the CLI's enrichment context document instead of the prompt.
+In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), MindRoom gives system enrichment to the agent through the CLI's enrichment context document, which it may not read; this instruction is marked `minimal_required`, so it stays in the prompt there too.
 
 ## Cost
 
-The turn waits for the hook, which bounds its state read to 2.5 seconds within its 3 second timeout. Each turn of an agent in a thread reads the tie: a thread without a tie costs two state reads (the agent's read, then MindRoom's retry through the router account), a tied one one. A team's turn and a turn outside a thread read nothing.
+The turn waits for the hook, which bounds its state read to 2.5 seconds within its 3 second timeout. Each turn of an agent in a thread reads the tie: a thread that never had a tie costs two state reads (the agent's read finds nothing, and MindRoom repeats it through the router account), a tied thread, and one whose tie was cleared (`{}`), one. A team's turn and a turn outside a thread read nothing.
 
 A failure never reaches the turn: a read that fails or takes longer than 2.5 seconds logs one warning with the room and the thread, and that turn gets no instruction. An error response from the homeserver reads as no tie, with nothing logged.
 

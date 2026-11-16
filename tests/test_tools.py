@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from test_hooks import _load_hooks_module
 from mindroom.hooks import HookBindings, SystemEnrichContext
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.registry import plugin_module_registrations
@@ -44,8 +45,9 @@ def _load_tools_module() -> ModuleType:
     module = util.module_from_spec(spec)
     sys.modules[module_name] = module
     # A plugin module registers its tools while it loads, as the plugin loader runs it.
-    with plugin_module_registrations(module_name):
+    with plugin_module_registrations(module_name) as registrations:
         spec.loader.exec_module(module)
+    module.test_registrations = registrations
     return module
 
 
@@ -91,13 +93,8 @@ class FakeRoomState:
     async def _query(
         self, room_id: str, event_type: str, state_key: str | None
     ) -> dict[str, Any] | None:
-        if state_key is not None:
-            return self.state.get((room_id, event_type, state_key))
-        return {
-            key: content
-            for (room, kind, key), content in self.state.items()
-            if (room, kind) == (room_id, event_type)
-        }
+        assert state_key is not None
+        return self.state.get((room_id, event_type, state_key))
 
     async def _put(
         self, room_id: str, event_type: str, state_key: str, content: dict[str, Any]
@@ -147,8 +144,31 @@ def test_instructions_make_the_worktree_in_the_workspace() -> None:
     assert 'use_worktree("worktrees/<name>", "<branch>")' in instructions
     assert 'cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&' in instructions
     assert "system prompt" in instructions
-    assert "run in that directory" not in instructions
     assert "`leave_worktree` before" in instructions
+
+
+def test_toolkit_requires_a_room() -> None:
+    """The tools need the call's runtime context and a live room, so the registration says so."""
+    metadata = _load_tools_module().test_registrations["thread_worktree"]
+
+    assert metadata.requires_room_context is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["y" * 256, "/".join(["y" * 100] * 3), "a/" * 101])
+async def test_long_path_is_refused(tmp_path: Path, path: str) -> None:
+    """A path longer than the limit is refused with the rules, before the filesystem is touched."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root):
+        result = json.loads(await tools.use_worktree(path))
+
+    assert result["status"] == "error"
+    assert "existing directory inside your workspace" in result["message"]
+    assert room.state == {}
+    room.putter.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -173,7 +193,6 @@ async def test_use_worktree_writes_and_is_idempotent(tmp_path: Path) -> None:
     assert "next turn" in first["note"]
     assert 'cd "$MINDROOM_AGENT_WORKSPACE/worktrees/a" &&' in first["note"]
     assert "`worktrees/a/`" in first["note"]
-    assert "applies" not in first["note"]
     assert again["changed"] is False
     assert again["note"] == first["note"]
     content = room.state[_key()]
@@ -506,19 +525,6 @@ async def test_tools_use_the_resolved_thread(
     assert room.state == {(ROOM, EVENT_TYPE, resolved_thread_id): {}}
 
 
-def _load_hooks_module() -> ModuleType:
-    """Load the plugin hooks module under its synthetic package name."""
-    hooks_path = Path(__file__).resolve().parents[1] / "hooks.py"
-    module_name = f"{PACKAGE_NAME}.hooks_test_{uuid4().hex}"
-    spec = util.spec_from_file_location(module_name, hooks_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def _turn(room: FakeRoomState, agent_name: str) -> SystemEnrichContext:
     """Build the context a system:enrich hook sees for `agent_name`'s turn in the thread, reading `room`'s state."""
     return SystemEnrichContext(
@@ -549,21 +555,18 @@ async def test_tie_written_by_the_tool_is_what_the_hook_reads(tmp_path: Path) ->
     with room.context(root, agent_name="code"):
         await tools.use_worktree("worktrees/a", "feat")
     tying, other = _turn(room, "code"), _turn(room, "reviewer")
-    await hooks.add_thread_worktree_instruction(tying)
-    await hooks.add_thread_worktree_instruction(other)
+    told = await hooks.add_thread_worktree_instruction(tying)
+    not_told = await hooks.add_thread_worktree_instruction(other)
 
-    assert [(item.key, item.cache_policy) for item in tying._items] == [
-        ("thread_worktree", "stable")
-    ]
-    assert "`worktrees/a` (branch `feat`)" in tying._items[0].text
-    assert other._items == []
+    assert told is not None
+    assert (told.key, told.cache_policy) == ("thread_worktree", "stable")
+    assert "`worktrees/a` (branch `feat`)" in told.text
+    assert not_told is None
 
     with room.context(root, agent_name="code"):
         await tools.leave_worktree()
     after_leaving = _turn(room, "code")
-    await hooks.add_thread_worktree_instruction(after_leaving)
-
-    assert after_leaving._items == []
+    assert await hooks.add_thread_worktree_instruction(after_leaving) is None
     for turn in (tying, other, after_leaving):
         turn.logger.warning.assert_not_called()
 

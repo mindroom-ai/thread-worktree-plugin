@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from mindroom.plugin_api import hook
+from mindroom.plugin_api import EnrichmentItem, hook
 
 from .state import ThreadWorktree, read_thread_worktree
 
@@ -30,14 +30,16 @@ def _worktree_instruction(worktree: ThreadWorktree) -> str:
 
 
 @hook(event="system:enrich", name="thread-worktree-instruction", timeout_ms=3000)
-async def add_thread_worktree_instruction(ctx: SystemEnrichContext) -> None:
+async def add_thread_worktree_instruction(
+    ctx: SystemEnrichContext,
+) -> EnrichmentItem | None:
     """Tell the agent that tied its thread to a worktree where that worktree is, on every turn in the thread."""
     # A team's turn has no one workspace the worktree is in.
     if ctx.target_member_names is not None:
-        return
+        return None
     thread_id = ctx.envelope.target.resolved_thread_id
     if thread_id is None:
-        return
+        return None
     room_id = ctx.envelope.room_id
     try:
         async with asyncio.timeout(STATE_READ_TIMEOUT_SECONDS):
@@ -51,12 +53,17 @@ async def add_thread_worktree_instruction(ctx: SystemEnrichContext) -> None:
             thread_id=thread_id,
             error=repr(exc),
         )
-        return
+        return None
     # The directory is in the workspace of the agent that tied the thread, so only that agent is told about it.
     if worktree is not None and worktree.set_by == ctx.target_entity_name:
-        ctx.add_instruction(
-            "thread_worktree", _worktree_instruction(worktree), cache_policy="stable"
+        # Required in minimal mode, where other system items reach the agent only through a document it may not read.
+        return EnrichmentItem(
+            key="thread_worktree",
+            text=_worktree_instruction(worktree),
+            cache_policy="stable",
+            minimal_required=True,
         )
+    return None
 
 
 __all__ = ["add_thread_worktree_instruction"]

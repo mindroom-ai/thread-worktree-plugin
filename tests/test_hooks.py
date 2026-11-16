@@ -81,8 +81,10 @@ async def _run(
     ctx: SystemEnrichContext, hooks: ModuleType | None = None
 ) -> list[EnrichmentItem]:
     """Run the hook on `ctx` and return the instructions it added."""
-    await (hooks or _load_hooks_module()).add_thread_worktree_instruction(ctx)
-    return list(ctx._items)
+    returned = await (hooks or _load_hooks_module()).add_thread_worktree_instruction(
+        ctx
+    )
+    return [] if returned is None else [returned]
 
 
 def test_hook_metadata() -> None:
@@ -108,7 +110,12 @@ async def test_tied_thread_gets_the_instruction() -> None:
         "!room:localhost", EVENT_TYPE, "$thread-root"
     )
     assert items == [
-        EnrichmentItem(key="thread_worktree", text=INSTRUCTION, cache_policy="stable")
+        EnrichmentItem(
+            key="thread_worktree",
+            text=INSTRUCTION,
+            cache_policy="stable",
+            minimal_required=True,
+        )
     ]
     ctx.logger.warning.assert_not_called()
 

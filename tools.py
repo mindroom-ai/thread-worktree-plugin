@@ -36,9 +36,9 @@ To work on a task in its own git worktree:
 1. Make it with the shell, with absolute paths: \
 `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
 2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace.
-3. From this thread's next turn, your system prompt names the thread's worktree. \
-Until then, and always, start every shell command for this work with \
-`cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths with the prefix `worktrees/<name>/`.
+3. Start every shell command for this work with \
+`cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths with the prefix `worktrees/<name>/`; \
+from the thread's next turn your system prompt reminds you.
 4. Call `leave_worktree` before you remove the worktree."""
 
 _REFUSAL = (
@@ -50,9 +50,8 @@ _REFUSAL = (
 
 def _note(path: str) -> str:
     return (
-        "From this thread's next turn, your system prompt names this worktree. Until then, and always, start every "
-        f'shell command for this work with `cd "$MINDROOM_AGENT_WORKSPACE/{path}" &&`, and give file tools paths with '
-        f"the prefix `{path}/`."
+        f'Start shell commands for this work with `cd "$MINDROOM_AGENT_WORKSPACE/{path}" &&`, and give file tools paths '
+        f"with the prefix `{path}/`; from the thread's next turn your system prompt reminds you."
     )
 
 
@@ -98,16 +97,15 @@ def _workspace_relative(root: Path, path: str) -> str | None:
     """Return the POSIX path of an existing subdirectory of the workspace, or None when it is not one."""
     try:
         root = root.resolve()
-        candidate = Path(path)
-        resolved = (
-            candidate.resolve()
-            if candidate.is_absolute()
-            else (root / candidate).resolve()
-        )
+        resolved = (root / path).resolve()
+        # Resolving follows every link, so a link that leaves the workspace ends up outside the root.
+        if (
+            not resolved.is_dir()
+            or not resolved.is_relative_to(root)
+            or resolved == root
+        ):
+            return None
     except (ValueError, OSError):
-        return None
-    # Resolving follows every link, so a link that leaves the workspace ends up outside the root.
-    if not resolved.is_dir() or not resolved.is_relative_to(root) or resolved == root:
         return None
     return resolved.relative_to(root).as_posix()
 
@@ -129,8 +127,8 @@ class ThreadWorktreeTools(Toolkit):
     async def use_worktree(self, path: str, branch: str = "") -> str:
         """Tie the current thread to a directory of your workspace, such as a git worktree you made.
 
-        From this thread's next turn, your system prompt names the directory. Until then, and always, start every shell
-        command for this work with `cd "$MINDROOM_AGENT_WORKSPACE/<path>" &&`. Other agents in the thread are not told.
+        Start shell commands for this work with `cd "$MINDROOM_AGENT_WORKSPACE/<path>" &&`. Other agents in the thread
+        are not told.
 
         Args:
             path: An existing directory inside your workspace, relative to the workspace root, such as `worktrees/<name>`.
@@ -141,6 +139,12 @@ class ThreadWorktreeTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, room_id, thread_id, bindings = resolved
+        # A relative path is checked as the state checks it before the filesystem is touched; an absolute one only
+        # becomes relative once it is resolved.
+        if not path.startswith("/") and not valid_worktree_path(
+            path.removeprefix("./").removesuffix("/")
+        ):
+            return _error("use", _REFUSAL)
         relative = _workspace_relative(context.agent_workspace_root(), path)
         if relative is None or not valid_worktree_path(relative):
             return _error("use", _REFUSAL)
@@ -224,7 +228,7 @@ class ThreadWorktreeTools(Toolkit):
         """Show the worktree directory of the current thread, if it has one.
 
         `exists` says whether the directory is an existing directory inside your workspace, and `applies` whether the
-        tie is yours to work in: it exists and you made the tie, so your system prompt names it.
+        tie is yours: you made it and its directory exists.
         """
         resolved = _resolve_state_access(action="get", require_putter=False)
         if isinstance(resolved, str):
@@ -263,6 +267,7 @@ class ThreadWorktreeTools(Toolkit):
     setup_type=SetupType.NONE,
     icon="LuGitBranch",
     icon_color="text-green-600",
+    requires_room_context=True,
 )
 def thread_worktree_factory() -> type[ThreadWorktreeTools]:
     """Factory function for the thread-worktree toolkit."""

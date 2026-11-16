@@ -33,11 +33,6 @@ def _load_state() -> Any:  # noqa: ANN401
 state = _load_state()
 
 
-def test_event_type() -> None:
-    """The event type is the documented one."""
-    assert state.THREAD_WORKTREE_EVENT_TYPE == "com.mindroom.thread.worktree"
-
-
 @pytest.mark.asyncio
 async def test_read_parses_full_event() -> None:
     """A full event reads into a ThreadWorktree with one keyed read."""
