@@ -52,43 +52,36 @@ def _context(thread_id: str | None = "$thread-root", **overrides: Any) -> Simple
     return SimpleNamespace(**values)
 
 
-@pytest.mark.parametrize(
-    ("function", "event", "name"),
-    [
-        ("work_in_thread_worktree", "turn:started", "thread-worktree-started"),
-        ("work_in_thread_worktree_after_approval", "turn:resumed", "thread-worktree-resumed"),
-    ],
-)
-def test_hook_metadata(function: str, event: str, name: str) -> None:
-    """Both hooks run on their turn event under their name with a 3 second timeout."""
-    metadata = get_hook_metadata(getattr(_load_hooks_module(), function))
+def test_hook_metadata() -> None:
+    """The hook runs on turn start under its name with a 3 second timeout, and is the only one."""
+    module = _load_hooks_module()
+    metadata = get_hook_metadata(module.work_in_thread_worktree)
+    assert module.__all__ == ["work_in_thread_worktree"]
 
     assert metadata is not None
-    assert metadata.event_name == event
-    assert metadata.hook_name == name
+    assert metadata.event_name == "turn:started"
+    assert metadata.hook_name == "thread-worktree-started"
     assert metadata.timeout_ms == 3000
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("function", ["work_in_thread_worktree", "work_in_thread_worktree_after_approval"])
-async def test_thread_with_worktree_sets_workdir(function: str) -> None:
+async def test_thread_with_worktree_sets_workdir() -> None:
     """A thread with a worktree gets its path as the turn's working directory."""
     ctx = _context()
 
-    await getattr(_load_hooks_module(), function)(ctx)
+    await _load_hooks_module().work_in_thread_worktree(ctx)
 
     ctx.query_room_state.assert_awaited_once_with("!room:localhost", EVENT_TYPE, "$thread-root")
     ctx.set_workdir.assert_called_once_with("worktrees/fix")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("function", ["work_in_thread_worktree", "work_in_thread_worktree_after_approval"])
-async def test_another_agents_tie_sets_nothing(function: str) -> None:
+async def test_another_agents_tie_sets_nothing() -> None:
     """The tie belongs to the agent that made it: another agent's turn in the thread stays in its workspace."""
     ctx = _context()
     ctx.envelope.agent_name = "reviewer"
 
-    await getattr(_load_hooks_module(), function)(ctx)
+    await _load_hooks_module().work_in_thread_worktree(ctx)
 
     ctx.set_workdir.assert_not_called()
     ctx.logger.warning.assert_not_called()

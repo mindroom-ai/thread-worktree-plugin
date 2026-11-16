@@ -308,6 +308,26 @@ async def test_leave_clears_only_when_set(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_leave_names_another_agents_tie(tmp_path: Path) -> None:
+    """Leaving clears another agent's tie and says whose it was; one's own tie names nobody."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root, agent_name="code"):
+        await tools.use_worktree("worktrees/a", "feat")
+    with room.context(root, agent_name="reviewer"):
+        result = json.loads(await tools.leave_worktree())
+    with room.context(root, agent_name="code"):
+        await tools.use_worktree("worktrees/a", "feat")
+        own = json.loads(await tools.leave_worktree())
+
+    assert result["changed"] is True
+    assert result["cleared_set_by"] == "code"
+    assert room.state[_key()] == {}
+    assert "cleared_set_by" not in own
+
+@pytest.mark.asyncio
 async def test_leave_failed_write_errors(tmp_path: Path) -> None:
     """A failed clear answers an error."""
     tools = _load_tools_module().ThreadWorktreeTools()

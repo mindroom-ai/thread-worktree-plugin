@@ -45,10 +45,4 @@ async def work_in_thread_worktree(ctx: TurnLifecycleContext) -> None:
     await _set_thread_workdir(ctx)
 
 
-@hook(event="turn:resumed", name="thread-worktree-resumed", timeout_ms=3000)
-async def work_in_thread_worktree_after_approval(ctx: TurnLifecycleContext) -> None:
-    """Resume the turn after an approval in its thread's worktree."""
-    await _set_thread_workdir(ctx)
-
-
-__all__ = ["work_in_thread_worktree", "work_in_thread_worktree_after_approval"]
+__all__ = ["work_in_thread_worktree"]

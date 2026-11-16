@@ -34,7 +34,7 @@ To work on a task in its own git worktree:
 2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace.
 3. From this thread's next turn your tools run in that directory. \
 Until then, start shell commands with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`.
-4. Call `leave_worktree` before you remove the worktree."""
+4. Call `leave_worktree` before you remove the worktree, and do not remove it while one of this thread's tool approvals is waiting."""
 
 _REFUSAL = (
     "Expected an existing directory inside your workspace, other than the workspace itself, "
@@ -169,13 +169,16 @@ class ThreadWorktreeTools(Toolkit):
         resolved = _resolve_state_access(action="leave", require_putter=True)
         if isinstance(resolved, str):
             return resolved
-        _, room_id, thread_id, bindings = resolved
+        context, room_id, thread_id, bindings = resolved
 
-        if await read_thread_worktree(bindings.room_state_querier, room_id, thread_id) is None:
+        current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
+        if current is None:
             return _payload("ok", action="leave", thread_id=thread_id, changed=False)
         if not await clear_thread_worktree(bindings.room_state_putter, room_id, thread_id):
             return _error("leave", "Failed to clear the worktree state event.")
-        return _payload("ok", action="leave", thread_id=thread_id, changed=True)
+        # Another agent's tie is cleared too, and the answer says whose it was.
+        cleared = {"cleared_set_by": current.set_by} if current.set_by != context.agent_name else {}
+        return _payload("ok", action="leave", thread_id=thread_id, changed=True, **cleared)
 
     async def get_worktree(self) -> str:
         """Show the worktree directory of the current thread, if it has one.
