@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 
 from agno.tools import Toolkit
 from mindroom.plugin_api import (
@@ -19,12 +18,14 @@ from mindroom.plugin_api import (
     register_tool_with_metadata,
 )
 
+from .directory import repository_of, tied_path, unrestricted
 from .state import (
     MAX_BRANCH_LENGTH,
     MAX_PATH_LENGTH,
     ThreadWorktree,
     clear_thread_worktree,
     read_thread_worktree,
+    shell_path,
     valid_branch,
     valid_worktree_path,
     write_thread_worktree,
@@ -32,12 +33,17 @@ from .state import (
 
 
 _INSTRUCTIONS = """\
-To work on a task in its own git worktree:
-1. Make it with the shell, with absolute paths: \
-`git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
-2. Call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace.
-3. Start every shell command for this work with \
-`cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths with the prefix `worktrees/<name>/`; \
+A coding task gets its own git worktree before the first change, in a thread that has none:
+1. Where `agent-cli` is installed, run `agent-cli dev new <branch>` in the clone of the repository the task is about. \
+It branches from the fetched default branch, fills submodules from the clone, installs dependencies, and ties this \
+thread to the new worktree by itself. Give the call a `timeout` long enough for the install, or add `--no-setup` to \
+skip it.
+2. Anywhere else, make it with the shell, with absolute paths: \
+`git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`, \
+then call `use_worktree("worktrees/<name>", "<branch>")`; the path is relative to your workspace. `use_worktree` also \
+ties a worktree that exists already.
+3. Start every shell command for this work with `cd` into the worktree, such as \
+`cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths inside it; \
 from the thread's next turn your system prompt reminds you.
 4. Call `leave_worktree` before you remove the worktree."""
 
@@ -45,12 +51,13 @@ _REFUSAL = (
     "Expected an existing directory inside your workspace, other than the workspace itself, "
     "given relative to the workspace root, such as `worktrees/<name>` for `$MINDROOM_AGENT_WORKSPACE/worktrees/<name>`,"
     f" whose path has at most {MAX_PATH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /, and no empty, `.` or `..` segment."
+    " Only an agent with unrestricted file access may tie a directory outside its workspace, by its absolute path."
 )
 
 
 def _note(path: str) -> str:
     return (
-        f'Start shell commands for this work with `cd "$MINDROOM_AGENT_WORKSPACE/{path}" &&`, and give file tools paths '
+        f'Start shell commands for this work with `cd "{shell_path(path)}" &&`, and give file tools paths '
         f"with the prefix `{path}/`; from the thread's next turn your system prompt reminds you."
     )
 
@@ -93,25 +100,17 @@ def _resolve_state_access(
     return context, context.room_id, context.resolved_thread_id, bindings
 
 
-def _workspace_relative(root: Path, path: str) -> str | None:
-    """Return the POSIX path of an existing subdirectory of the workspace, or None when it is not one."""
-    try:
-        root = root.resolve()
-        resolved = (root / path).resolve()
-        # Resolving follows every link, so a link that leaves the workspace ends up outside the root.
-        if (
-            not resolved.is_dir()
-            or not resolved.is_relative_to(root)
-            or resolved == root
-        ):
-            return None
-    except (ValueError, OSError):
-        return None
-    return resolved.relative_to(root).as_posix()
+def _tied_path(context: ToolRuntimeContext, path: str) -> str | None:
+    """Return how a tie names the directory `path` for the calling agent, or None when it may not tie it."""
+    return tied_path(
+        context.agent_workspace_root(),
+        path,
+        outside=unrestricted(context.config, context.agent_name),
+    )
 
 
 class ThreadWorktreeTools(Toolkit):
-    """Toolkit for tying a Matrix thread to a directory in the agent's workspace."""
+    """Toolkit for tying a Matrix thread to a directory the agent works in."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -124,15 +123,18 @@ class ThreadWorktreeTools(Toolkit):
             ],
         )
 
-    async def use_worktree(self, path: str, branch: str = "") -> str:
+    async def use_worktree(self, path: str, branch: str = "", repo: str = "") -> str:
         """Tie the current thread to a directory of your workspace, such as a git worktree you made.
 
         Start shell commands for this work with `cd "$MINDROOM_AGENT_WORKSPACE/<path>" &&`. Other agents in the thread
         are not told.
 
         Args:
-            path: An existing directory inside your workspace, relative to the workspace root, such as `worktrees/<name>`.
+            path: An existing directory inside your workspace, relative to the workspace root, such as
+                `worktrees/<name>`; with unrestricted file access also one outside it, by its absolute path.
             branch: The worktree's branch, shown with the thread; optional.
+            repo: The repository's name, shown with the branch; optional, and known without it for a worktree at
+                `<repo>-worktrees/<name>`.
 
         """
         resolved = _resolve_state_access(action="use", require_putter=True)
@@ -145,8 +147,8 @@ class ThreadWorktreeTools(Toolkit):
             path.removeprefix("./").removesuffix("/")
         ):
             return _error("use", _REFUSAL)
-        relative = _workspace_relative(context.agent_workspace_root(), path)
-        if relative is None or not valid_worktree_path(relative):
+        tied = _tied_path(context, path)
+        if tied is None:
             return _error("use", _REFUSAL)
         branch = branch.strip()
         if not valid_branch(branch):
@@ -154,27 +156,34 @@ class ThreadWorktreeTools(Toolkit):
                 "use",
                 f"The branch must have at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /.",
             )
+        repo = repo.strip() or repository_of(tied)
+        if not valid_branch(repo):
+            return _error(
+                "use",
+                f"The repository must have at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /.",
+            )
 
         current = await read_thread_worktree(
             bindings.room_state_querier, room_id, thread_id
         )
-        tie = (relative, branch, context.agent_name)
+        tie = (tied, branch, repo, context.agent_name)
         if (
             current is not None
-            and (current.path, current.branch, current.set_by) == tie
+            and (current.path, current.branch, current.repo, current.set_by) == tie
         ):
             return _payload(
                 "ok",
                 action="use",
                 thread_id=thread_id,
-                path=relative,
+                path=tied,
                 branch=branch,
+                repo=repo,
                 changed=False,
-                note=_note(relative),
+                note=_note(tied),
             )
 
         # The tie is one agent's; another agent's tie of this thread is replaced, and the answer says whose it was.
-        worktree = ThreadWorktree(relative, branch, context.agent_name, _now_iso())
+        worktree = ThreadWorktree(tied, branch, context.agent_name, _now_iso(), repo)
         if not await write_thread_worktree(
             bindings.room_state_putter, room_id, thread_id, worktree
         ):
@@ -188,10 +197,11 @@ class ThreadWorktreeTools(Toolkit):
             "ok",
             action="use",
             thread_id=thread_id,
-            path=relative,
+            path=tied,
             branch=branch,
+            repo=repo,
             changed=True,
-            note=_note(relative),
+            note=_note(tied),
             **replaced,
         )
 
@@ -227,8 +237,8 @@ class ThreadWorktreeTools(Toolkit):
     async def get_worktree(self) -> str:
         """Show the worktree directory of the current thread, if it has one.
 
-        `exists` says whether the directory is an existing directory inside your workspace, and `applies` whether the
-        tie is yours: you made it and its directory exists.
+        `exists` says whether the directory is an existing directory you may work in, and `applies` whether the tie is
+        yours: you made it and its directory exists.
         """
         resolved = _resolve_state_access(action="get", require_putter=False)
         if isinstance(resolved, str):
@@ -240,16 +250,14 @@ class ThreadWorktreeTools(Toolkit):
         )
         if current is None:
             return _payload("ok", action="get", thread_id=thread_id)
-        exists = (
-            _workspace_relative(context.agent_workspace_root(), current.path)
-            is not None
-        )
+        exists = _tied_path(context, current.path) is not None
         return _payload(
             "ok",
             action="get",
             thread_id=thread_id,
             path=current.path,
             branch=current.branch,
+            repo=current.repo,
             set_by=current.set_by,
             set_at=current.set_at,
             exists=exists,
@@ -261,7 +269,7 @@ class ThreadWorktreeTools(Toolkit):
     name="thread_worktree",
     file_access=ToolFileAccess.NONE,
     display_name="Thread Worktree",
-    description="Tie the current Matrix thread to a git worktree directory in the agent's workspace.",
+    description="Tie the current Matrix thread to the git worktree directory the agent works in.",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

@@ -18,36 +18,44 @@ type RoomStatePutter = Callable[[str, str, str, dict[str, Any]], Awaitable[bool]
 
 @dataclass(frozen=True, slots=True)
 class ThreadWorktree:
-    """The directory a thread works in."""
+    """The directory a thread works in: relative to the workspace of the agent that tied it, or absolute."""
 
     path: str
     branch: str
     set_by: str
     set_at: str
+    repo: str = ""
 
 
-# Both values go into the agent's system prompt, so they hold only plain path characters and no prose or markup.
+# The path and the branch go into the agent's system prompt, so they hold only plain path characters and no prose or
+# markup; the repository's name, which clients show beside the branch, holds the same.
 _PLAIN_PATH = re.compile(r"[A-Za-z0-9._/-]+")
 MAX_PATH_LENGTH = 200
 MAX_BRANCH_LENGTH = 100
 
 
 def valid_worktree_path(path: object) -> bool:
-    """Return whether `path` names a directory inside the workspace that the worktree instruction can quote."""
+    """Return whether `path` names a directory, inside the workspace or absolute, that the instruction can quote."""
     if (
         not isinstance(path, str)
         or len(path) > MAX_PATH_LENGTH
         or _PLAIN_PATH.fullmatch(path) is None
     ):
         return False
-    # An empty, `.` or `..` segment, an absolute path or a path without parts names no directory inside the workspace.
-    return path[0] != "/" and all(
-        segment not in {"", ".", ".."} for segment in path.split("/")
+    # An empty, `.` or `..` segment or a path without parts names no one directory; one leading slash makes the path
+    # absolute.
+    return all(
+        segment not in {"", ".", ".."} for segment in path.removeprefix("/").split("/")
     )
 
 
+def shell_path(path: str) -> str:
+    """Return a worktree's path as a shell command names it: as it is when absolute, else below the workspace."""
+    return path if path.startswith("/") else f"$MINDROOM_AGENT_WORKSPACE/{path}"
+
+
 def valid_branch(branch: object) -> bool:
-    """Return whether `branch` is empty or holds only plain path characters, at most 100 of them."""
+    """Return whether `branch`, or a repository's name, is empty or holds only plain path characters, at most 100."""
     return (
         isinstance(branch, str)
         and len(branch) <= MAX_BRANCH_LENGTH
@@ -67,11 +75,13 @@ async def read_thread_worktree(
     branch = content.get("branch")
     set_by = content.get("set_by")
     set_at = content.get("set_at")
+    repo = content.get("repo")
     return ThreadWorktree(
         content["path"],
         branch if valid_branch(branch) else "",
         set_by if isinstance(set_by, str) else "",
         set_at if isinstance(set_at, str) else "",
+        repo if valid_branch(repo) else "",
     )
 
 
@@ -91,6 +101,7 @@ async def write_thread_worktree(
             "branch": worktree.branch,
             "set_by": worktree.set_by,
             "set_at": worktree.set_at,
+            "repo": worktree.repo,
         },
     )
 
