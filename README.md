@@ -20,7 +20,7 @@ Once an agent ties a thread with `use_worktree`, every subsequent turn injects a
 - **Per-thread isolation:** records the thread's worktree directory, optional branch, and optional repository name in Matrix room state.
 - **Always in context:** injects the reminder with `cache_policy="stable"` and `minimal_required=True`, so it stays active even in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/).
 - **Branch chips in MindRoom Chat:** MindRoom Chat's bundled [`pull-request-client-plugin`](https://github.com/mindroom-ai/pull-request-client-plugin) shows the active branch chip on thread cards (prefixed with the repository name in rooms spanning multiple repos).
-- **Agent-guided workflow:** toolkit instructions prompt the agent to create a worktree before making its first edit and call `leave_worktree` before removing it.
+- **Agent-guided workflow:** the plugin never runs `git` or changes tool working directories—toolkit instructions prompt the agent to create and remove worktrees in its own shell and call `use_worktree` / `leave_worktree`, keeping every `cd` explicit in approvals.
 
 ## Quick start
 
@@ -41,24 +41,10 @@ agents:
       - shell
 ```
 
+No plugin settings are required; the hook runs automatically once loaded.
+
 Update later with `mindroom plugins update thread-worktree-plugin`.
-Requires MindRoom plugin API 1.30 or later. No plugin settings are required; the hook runs automatically once loaded.
-
-## What it does and does not do
-
-**What it does:**
-
-1. The agent creates a worktree via `shell` using absolute paths from `$MINDROOM_AGENT_WORKSPACE` (git resolves relative paths against the clone, not the workspace):
-   `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`
-2. The agent calls `use_worktree("worktrees/<name>", "<branch>", "<repo>")`. The plugin verifies the directory exists and writes room state; `branch` and `repo` are optional labels (spell one repo consistently across threads so UI clients group them cleanly).
-3. From the next turn onward, `thread-worktree-instruction` adds the system-prompt reminder above (omitting the branch clause if empty, or naming the absolute path for unrestricted outside-workspace ties).
-4. Before deleting the worktree, the agent calls `leave_worktree()` to clear the tie.
-
-**What it does not do:**
-
-- **Does not change tool working directories:** `shell` still starts in the agent's workspace so every command's `cd` stays explicit in tool approvals, and `file`/`coding` tools keep using workspace-relative paths such as `worktrees/<name>/src/app.py`.
-- **Does not run `git` or manage worktree files:** the agent creates and removes worktrees in its own shell (inside its worker if sandboxed), keeping git hooks and repo setup in the agent's execution environment.
-- **Does not apply outside threads or on team turns:** all three tools refuse room-level calls, and the hook ignores room-level messages and team turns.
+Needs MindRoom v2026.11.323 or later (plugin API 1.30).
 
 ## Tools
 
@@ -75,6 +61,23 @@ Toolkit name: `thread_worktree` (all three tools are thread-scoped only).
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `thread-worktree-instruction` | `system:enrich` | Add the worktree reminder (`minimal_required`, `stable` cache policy) to the tying agent's system prompt on each thread turn. |
+
+<details>
+<summary><b>How it works</b></summary>
+
+1. The agent creates a worktree via `shell` using absolute paths from `$MINDROOM_AGENT_WORKSPACE` (git resolves relative paths against the clone, not the workspace):
+   `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`
+2. The agent calls `use_worktree("worktrees/<name>", "<branch>", "<repo>")`. The plugin verifies the directory exists and writes room state; `branch` and `repo` are optional labels (spell one repo consistently across threads so UI clients group them cleanly).
+3. From the next turn onward, `thread-worktree-instruction` adds the system-prompt reminder above (omitting the branch clause if empty, or naming the absolute path for unrestricted outside-workspace ties).
+4. Before deleting the worktree, the agent calls `leave_worktree()` to clear the tie.
+
+**What it does not do:**
+
+- **Does not change tool working directories:** `shell` still starts in the agent's workspace so every command's `cd` stays explicit in tool approvals, and `file`/`coding` tools keep using workspace-relative paths such as `worktrees/<name>/src/app.py`.
+- **Does not run `git` or manage worktree files:** the agent creates and removes worktrees in its own shell (inside its worker if sandboxed), keeping git hooks and repo setup in the agent's execution environment.
+- **Does not apply outside threads or on team turns:** all three tools refuse room-level calls, and the hook ignores room-level messages and team turns.
+
+</details>
 
 <details>
 <summary><b>Security, path validation, and outside-workspace access</b></summary>
