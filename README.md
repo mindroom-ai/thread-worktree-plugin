@@ -1,7 +1,9 @@
 # Thread Worktree
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/mindroom-ai/thread-worktree-plugin/actions/workflows/plugin-ci.yml/badge.svg)](https://github.com/mindroom-ai/thread-worktree-plugin/actions/workflows/plugin-ci.yml)
 [![Docs](https://img.shields.io/badge/docs-plugins-blue)](https://docs.mindroom.chat/plugins/)
+[![Tools](https://img.shields.io/badge/docs-tools-blue)](https://docs.mindroom.chat/tools/)
 [![Hooks](https://img.shields.io/badge/docs-hooks-blue)](https://docs.mindroom.chat/hooks/)
 
 <picture>
@@ -9,111 +11,97 @@
   <img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark.svg" alt="MindRoom Logo" align="right" width="120" />
 </picture>
 
-One git worktree per thread for the agents of [MindRoom](https://github.com/mindroom-ai/mindroom).
+A [MindRoom](https://github.com/mindroom-ai/mindroom) tool and hook plugin that binds each Matrix thread to its own git worktree so parallel threads can work on separate branches without colliding.
 
-## What it does
+Once an agent ties a thread with `use_worktree`, every subsequent turn injects a stable reminder into that agent's system prompt:
 
-- Records which git worktree a Matrix thread works in, as room state, when the agent that made the worktree ties the thread to it: the directory, and the branch and repository the agent names.
-- Reminds that agent on every turn in the thread, in its system prompt, where the worktree is and how to work in it.
-- Tells the agent, in the toolkit's instructions, to give a coding task its own worktree before the first change.
+> This thread works in the git worktree `worktrees/<name>` (branch `<branch>`), a directory inside your workspace. Start every shell command for this thread's work with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`. For file tools, name files with the prefix `worktrees/<name>/`. If the directory is missing, tell the user and call leave_worktree.
 
-The pull request client plugin of MindRoom Chat ([`mindroom-ai/pull-request-client-plugin`](https://github.com/mindroom-ai/pull-request-client-plugin)) shows the branch on the thread's card, and before it the repository's name in a room that works on several repositories.
+- **Per-thread isolation:** records the thread's worktree directory, optional branch, and optional repository name in Matrix room state.
+- **Always in context:** injects the reminder with `cache_policy="stable"` and `minimal_required=True`, so it stays active even in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/).
+- **Branch chips in MindRoom Chat:** MindRoom Chat's bundled [`pull-request-client-plugin`](https://github.com/mindroom-ai/pull-request-client-plugin) shows the active branch chip on thread cards (prefixed with the repository name in rooms spanning multiple repos).
+- **Agent-guided workflow:** toolkit instructions prompt the agent to create a worktree before making its first edit and call `leave_worktree` before removing it.
 
-So several threads can work on different branches of the same repository without touching each other.
-
-## What it does not do
-
-It does not change where MindRoom runs tools. `shell` still starts every command in the agent's workspace, and the agent's commands `cd` into the worktree themselves. `file` and `coding` take workspace-relative paths, which name the worktree's files with its prefix, such as `worktrees/<name>/src/app.py`.
-
-That is on purpose: the directory a command runs in is part of the command, so a tool approval shows exactly what will run and where, and nothing outside the command decides it.
-
-The plugin does not make or remove worktrees either; the agent does that with its shell. So git, and whatever a repository's hooks and setup run, stay where the agent's own commands run, which for a sandboxed agent is its worker.
-
-## How it works
-
-1. The agent makes a worktree with its shell, with absolute paths built from `$MINDROOM_AGENT_WORKSPACE`:
-   `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
-   Git resolves a relative path against the clone, not the workspace, so a relative `worktrees/<name>` would land inside the clone.
-2. It calls `use_worktree("worktrees/<name>", "<branch>", "<repository>")`, with the path relative to the workspace. The tool checks that the directory exists inside the workspace and writes the state event. The branch and the repository's name are optional, and are the agent's own words: the plugin reads no file of the worktree and runs no git. A repository should be spelled the same way in every thread, such as by its clone's name, because clients tell repositories apart by that name.
-3. From the thread's next turn, the `thread-worktree-instruction` hook adds this to the agent's system prompt (for `worktrees/<name>` on branch `<branch>`):
-
-   > This thread works in the git worktree `worktrees/<name>` (branch `<branch>`), a directory inside your workspace. Start every shell command for this thread's work with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`. For file tools, name files with the prefix `worktrees/<name>/`. If the directory is missing, tell the user and call leave_worktree.
-
-   Without a branch the instruction leaves out the branch clause. It is the same on every turn of the thread, so it is returned as a required item (`minimal_required`) with the `stable` cache policy. Until the next turn the agent starts its shell commands with that `cd` anyway (the tool's answer says so).
-4. The agent calls `leave_worktree` before it removes the worktree. That clears the event, and the thread's turns get no instruction any more.
-
-### Outside the workspace
-
-An agent whose [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) is `unrestricted` may tie a directory outside its workspace, by its absolute path, which is where the worktrees of a clone outside the workspace are. The tie then holds the absolute path, and the instruction names it as it is: ``cd "/srv/worktrees/<name>" &&``. The path is checked where MindRoom's primary process runs, so this is for an agent whose shell runs there too, not in a worker. For such an agent a state event written by hand can name any directory of the host in the instruction, as its own tools can reach any.
-
-Any other agent is confined to its workspace, where its worker, when its tools run in one, controls every file, while this plugin runs in MindRoom's primary process. So a confined agent's path is checked with MindRoom's own walk for such files (`open_directory_within_root`): from the workspace root, part by part, without following a link, so that it says nothing about what is outside the workspace. A directory that a link leads to is therefore refused, also when the link stays inside the workspace, and so is one that MindRoom may enter but not read. An absolute path counts as inside the workspace when it starts with the workspace root as MindRoom spells it (`$MINDROOM_AGENT_WORKSPACE`). A state event that names a directory outside the workspace, written by hand, gives a confined agent no instruction.
-
-The tie belongs to the agent that made it: the directory is in that agent's workspace, or where its file access reaches, so only that agent is told about it, and other agents in the thread are not. A thread has one tie, so `use_worktree` by another agent replaces it (the last one wins), and its answer names the previous `path` and `set_by` under `replaced`. A private agent's path is checked in the workspace of the turn's requester, since each requester has their own. In a thread that several people write in, the tie is recorded under the private agent's name, so every requester's turn of that agent gets the instruction, pointing into that requester's own workspace (or, for a tie outside the workspace, at the one directory it names); tie worktrees in threads one person works in.
-
-What is refused:
-
-- `use_worktree` refuses a path that is not an existing directory, the workspace itself, for an agent without unrestricted file access a directory outside its workspace and one that a link leads to, and a path with a backtick, a double quote, `$`, a backslash or a newline, which could bend the instruction. A state event with such a path, or one that breaks the length or segment rules, written by hand, reads as no tie; a hand-written path that is valid text is taken as it is, because the hook does not look at the filesystem, which is why the instruction tells the agent what to do when the directory is missing.
-- `use_worktree` checks the directory in the workspace as MindRoom's primary process sees it. A static runner that does not mount the agents' storage makes the worktree in its own copy of the workspace, which the primary cannot see, so `use_worktree` refuses it.
-- Writing the tie needs the right to send that state event in the room. When the agent's account lacks it, MindRoom retries through the router account; if that fails too, the tool answers an error.
-- A team's turn gets no instruction, and outside a thread there is nothing to tie, so the tools refuse and the hook does nothing.
-
-In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), MindRoom gives system enrichment to the agent through the CLI's enrichment context document, which it may not read; this instruction is marked `minimal_required`, so it stays in the prompt there too.
-
-## Cost
-
-The turn waits for the hook, which bounds its state read to 2.5 seconds within its 3 second timeout. Each turn of an agent in a thread reads the tie: a thread that never had a tie costs two state reads (the agent's read finds nothing, and MindRoom repeats it through the router account), a tied thread, and one whose tie was cleared (`{}`), one. A team's turn and a turn outside a thread read nothing.
-
-A failure never reaches the turn: a read that fails or takes longer than 2.5 seconds logs one warning with the room and the thread, and that turn gets no instruction. An error response from the homeserver reads as no tie, with nothing logged.
-
-## Agent Tools
-
-The toolkit is named `thread_worktree`.
-
-| Tool | Purpose |
-|------|---------|
-| `use_worktree(path, branch="", repo="")` | Tie the current thread to a directory of the workspace, given relative to the workspace root, with an optional branch and repository name. With unrestricted file access also a directory outside the workspace, by its absolute path |
-| `leave_worktree()` | Remove the tie. When another agent made it, the answer names that agent under `cleared_set_by` |
-| `get_worktree()` | Show the current thread's directory, branch, repository, `set_by` and `set_at`, if it has any, with `exists` (it is an existing directory the caller may tie) and `applies` (it exists and the caller made the tie) |
-
-All three tools are thread-scoped only. They refuse to operate at room level.
-
-## Hooks
-
-| Hook | Event | Purpose |
-|------|-------|---------|
-| `thread-worktree-instruction` | `system:enrich` | Tell the tying agent, in its system prompt, where its thread's worktree is |
-
-## Storage
-
-- Event type: `com.mindroom.thread.worktree`
-- State key: the thread's root event ID
-- Payload fields: `path` (relative to the agent's workspace, or absolute for a directory outside it; POSIX separators), `branch` (can be empty), `repo` (the repository's name for display, can be empty), `set_by` (the name of the agent that made the tie), `set_at`
-- `path` holds only `A-Z a-z 0-9 . _ - /` (at most 200 characters, no empty, `.` or `..` segment; one leading `/` makes it absolute), and `branch` and `repo` only `A-Z a-z 0-9 . _ - /` (at most 100 characters); anything else reads as no worktree, or as no branch or repository, because the path and the branch go into the system prompt
-- Leaving writes an empty payload (`{}`) for that state key; a thread without a tie has no event or an empty one
-
-## Install
-
-The plugin needs no special MindRoom version beyond its manifest's (`"mindroom_plugin_api": "1.30"`).
-
-Vendor it with the MindRoom CLI:
+## Quick start
 
 ```bash
 mindroom plugins install thread-worktree-plugin
 ```
 
-Then reference it from `config.yaml`:
+Enable the plugin and attach both `thread_worktree` and `shell` to each coding agent in `config.yaml`:
 
 ```yaml
 plugins:
   - path: plugins/thread-worktree-plugin
+
+agents:
+  coder:
+    tools:
+      - thread_worktree
+      - shell
 ```
 
-Add `thread_worktree` to the tools list of each agent that should work in worktrees, together with `shell` (to make them and work in them). The hook works for every agent once the plugin is loaded. There is nothing else to configure.
+Update later with `mindroom plugins update thread-worktree-plugin`.
+Requires MindRoom plugin API 1.30 or later. No plugin settings are required; the hook runs automatically once loaded.
 
-Update to the latest commit later with:
+## What it does and does not do
 
-```bash
-mindroom plugins update thread-worktree-plugin
-```
+**What it does:**
 
-The command pins the exact installed commit in `.mindroom-plugin.lock.json` and strictly validates the plugin before activating it.
+1. The agent creates a worktree via `shell` using absolute paths from `$MINDROOM_AGENT_WORKSPACE` (git resolves relative paths against the clone, not the workspace):
+   `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`
+2. The agent calls `use_worktree("worktrees/<name>", "<branch>", "<repo>")`. The plugin verifies the directory exists and writes room state; `branch` and `repo` are optional labels (spell one repo consistently across threads so UI clients group them cleanly).
+3. From the next turn onward, `thread-worktree-instruction` adds the system-prompt reminder above (omitting the branch clause if empty, or naming the absolute path for unrestricted outside-workspace ties).
+4. Before deleting the worktree, the agent calls `leave_worktree()` to clear the tie.
+
+**What it does not do:**
+
+- **Does not change tool working directories:** `shell` still starts in the agent's workspace so every command's `cd` stays explicit in tool approvals, and `file`/`coding` tools keep using workspace-relative paths such as `worktrees/<name>/src/app.py`.
+- **Does not run `git` or manage worktree files:** the agent creates and removes worktrees in its own shell (inside its worker if sandboxed), keeping git hooks and repo setup in the agent's execution environment.
+- **Does not apply outside threads or on team turns:** all three tools refuse room-level calls, and the hook ignores room-level messages and team turns.
+
+## Tools
+
+Toolkit name: `thread_worktree` (all three tools are thread-scoped only).
+
+| Tool | Purpose |
+|------|---------|
+| `use_worktree(path, branch="", repo="")` | Tie the current thread to an existing workspace-relative directory (or an absolute path when `file_access: unrestricted`), with optional `branch` and `repo` labels. Replaces any existing tie (`replaced` names the previous owner). |
+| `leave_worktree()` | Clear the thread's worktree tie. Reports `cleared_set_by` if another agent owned it. |
+| `get_worktree()` | Show the thread's `path`, `branch`, `repo`, `set_by`, and `set_at`, plus `exists` (directory exists and caller may tie it) and `applies` (`exists` and caller made the tie). |
+
+## Hooks
+
+| Hook | Event | Purpose |
+|------|-------|---------|
+| `thread-worktree-instruction` | `system:enrich` | Add the worktree reminder (`minimal_required`, `stable` cache policy) to the tying agent's system prompt on each thread turn. |
+
+<details>
+<summary><b>Security, path validation, and outside-workspace access</b></summary>
+
+- **Allowed characters and segments:** `path` allows only `A-Z a-z 0-9 . _ - /` (no spaces or shell metacharacters), at most 200 characters, with no empty, `.`, or `..` segments (one leading `/` marks an absolute path). `branch` and `repo` allow only `A-Z a-z 0-9 . _ - /` (at most 100 characters). For relative paths, `use_worktree` strips a leading `./` and trailing `/` before validation; `branch` and `repo` are trimmed.
+- **Workspace-confined agents (default):** paths are verified from `$MINDROOM_AGENT_WORKSPACE` part-by-part via `open_directory_within_root` without following symlinks. The workspace root itself, non-existent directories, directories outside the workspace, symlinks (even inside the workspace), and directories MindRoom cannot read are refused. Hand-written state events pointing outside the workspace produce no instruction for confined agents.
+- **Unrestricted agents (`file_access: unrestricted`):** may tie an existing directory outside the workspace by absolute path (resolved on MindRoom's primary host, so intended for agents whose shell also runs there rather than in an isolated worker). See [file access posture](https://docs.mindroom.chat/architecture/security-posture/#file-access).
+- **Primary-process visibility:** `use_worktree` checks directories as MindRoom's primary process sees them; a static runner without shared agent storage cannot have its local worktrees verified.
+- **Ownership and private agents:** only the tying agent (`set_by`) gets the system-prompt reminder; another agent calling `use_worktree` overwrites the tie (last writer wins). For private agents, `use_worktree` validates against the requester's workspace while storing the tie under the agent's name—tie worktrees in single-user threads.
+- **Hand-written state and permissions:** the hook validates syntax only (without touching the filesystem), ignoring malformed events; if a syntactically valid directory is missing, the instruction tells the agent to inform the user and call `leave_worktree`. Writing ties requires room state-event permissions (MindRoom retries through the router account if the agent lacks them).
+
+</details>
+
+<details>
+<summary><b>Latency and failure handling</b></summary>
+
+- **Per-turn state reads:** `thread-worktree-instruction` bounds its room-state query to `2.5s` inside its `3s` timeout (`timeout_ms=3000`). A thread that has never been tied incurs two reads (agent account, then router fallback); a tied or cleared (`{}`) thread incurs one. Room-level turns and team turns perform zero reads.
+- **Fail-open behavior:** if a state read fails or exceeds `2.5s`, the hook logs one warning with `room_id` and `thread_id` and skips the instruction without breaking the turn. Homeserver error responses read as no tie without logging.
+
+</details>
+
+<details>
+<summary><b>Matrix room-state storage</b></summary>
+
+- **Event type:** `com.mindroom.thread.worktree`
+- **State key:** the thread's root event ID
+- **Payload fields:** `path` (POSIX separators; relative to workspace or absolute), `branch` (may be empty), `repo` (repository display name; may be empty), `set_by` (tying agent name), `set_at` (UTC ISO-8601 timestamp)
+- **Clearing:** `leave_worktree()` writes an empty object (`{}`) under that state key; absent, empty, or invalid payloads read as no tie.
+
+</details>
