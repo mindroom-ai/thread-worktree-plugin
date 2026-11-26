@@ -17,6 +17,7 @@ import pytest
 from test_hooks import _load_hooks_module
 from mindroom.hooks import HookBindings, SystemEnrichContext
 from mindroom.message_target import MessageTarget
+from mindroom.plugin_api import Toolkit
 from mindroom.tool_system.registry import plugin_module_registrations
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -163,9 +164,13 @@ def test_instructions_make_the_worktree_in_the_workspace() -> None:
 
 def test_toolkit_requires_a_room() -> None:
     """The tools need the call's runtime context and a live room, so the registration says so."""
-    metadata = _load_tools_module().test_registrations["thread_worktree"]
+    module = _load_tools_module()
+    metadata = module.test_registrations["thread_worktree"]
+    tools = module.ThreadWorktreeTools()
 
     assert metadata.requires_room_context is True
+    assert isinstance(tools, Toolkit)
+    assert list(tools.functions) == ["use_worktree", "leave_worktree", "get_worktree"]
 
 
 @pytest.mark.asyncio

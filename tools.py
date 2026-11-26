@@ -7,16 +7,17 @@ import asyncio
 import json
 from datetime import UTC, datetime
 
-from agno.tools import Toolkit
 from mindroom.plugin_api import (
     HookBindings,
     SetupType,
     ToolCategory,
     ToolFileAccess,
+    Toolkit,
     ToolRuntimeContext,
     ToolStatus,
     get_tool_runtime_context,
     register_tool_with_metadata,
+    tool,
 )
 
 from .directory import file_access, tied_path
@@ -116,13 +117,9 @@ class ThreadWorktreeTools(Toolkit):
         super().__init__(
             name="thread_worktree",
             instructions=_INSTRUCTIONS,
-            tools=[
-                self.use_worktree,
-                self.leave_worktree,
-                self.get_worktree,
-            ],
         )
 
+    @tool
     async def use_worktree(self, path: str, branch: str = "", repo: str = "") -> str:
         """Tie the current thread to a directory you work in, such as a git worktree you made.
 
@@ -197,6 +194,7 @@ class ThreadWorktreeTools(Toolkit):
             **replaced,
         )
 
+    @tool
     async def leave_worktree(self) -> str:
         """Untie the current thread from its worktree; from its next turn your system prompt no longer names it.
 
@@ -226,6 +224,7 @@ class ThreadWorktreeTools(Toolkit):
             "ok", action="leave", thread_id=thread_id, changed=True, **cleared
         )
 
+    @tool
     async def get_worktree(self) -> str:
         """Show the worktree directory of the current thread, if it has one.
 
