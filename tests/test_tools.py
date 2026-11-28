@@ -14,15 +14,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from test_hooks import _load_hooks_module
 from mindroom.hooks import HookBindings, SystemEnrichContext
 from mindroom.message_target import MessageTarget
 from mindroom.plugin_api import Toolkit
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.registry import plugin_module_registrations
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     tool_runtime_context,
 )
+from mindroom.tool_system.toolkits import adapt_toolkit, configure_toolkit_functions
+from test_hooks import _load_hooks_module
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -154,23 +156,130 @@ def test_instructions_make_the_worktree_in_the_workspace() -> None:
         in instructions
     )
     assert (
-        'use_worktree("worktrees/<name>", "<branch>", "<repository>")' in instructions
+        'thread_worktree(action="use", path="worktrees/<name>", branch="<branch>", repo="<repository>")'
+        in instructions
     )
     assert "only an agent with unrestricted file access" in instructions
     assert 'cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&' in instructions
     assert "system prompt" in instructions
-    assert "`leave_worktree` before" in instructions
+    assert '`thread_worktree(action="leave")` before' in instructions
 
 
-def test_toolkit_requires_a_room() -> None:
-    """The tools need the call's runtime context and a live room, so the registration says so."""
+def test_toolkit_metadata_and_adapted_schema(tmp_path: Path) -> None:
+    """The toolkit exposes one action-based tool with strict schema and no framework wrapper args."""
     module = _load_tools_module()
     metadata = module.test_registrations["thread_worktree"]
     tools = module.ThreadWorktreeTools()
 
     assert metadata.requires_room_context is True
     assert isinstance(tools, Toolkit)
-    assert list(tools.functions) == ["use_worktree", "leave_worktree", "get_worktree"]
+    assert list(tools.functions) == ["thread_worktree"]
+    assert tools.offer_background_after is False
+    assert tools.offer_output_path is False
+
+    configure_toolkit_functions(
+        tools, output_files=ToolOutputFilePolicy(workspace_root=tmp_path)
+    )
+    adapted = adapt_toolkit(tools)
+    assert [fn.name for fn in adapted.functions] == ["thread_worktree"]
+    [fn] = adapted.functions
+    assert fn.offer_background_after is False
+    assert fn.offer_output_path is False
+    assert fn.parameters["required"] == ["action"]
+    properties = fn.parameters["properties"]
+    assert list(properties) == ["action", "path", "branch", "repo"]
+    assert properties["action"]["type"] == "string"
+    assert properties["action"]["enum"] == ["use", "get", "leave"]
+    for optional_param in ("path", "branch", "repo"):
+        assert properties[optional_param]["type"] == "string"
+        assert "anyOf" not in properties[optional_param]
+    assert "background_after" not in properties
+    assert "mindroom_output_path" not in properties
+
+
+def test_approval_and_retirement_metadata() -> None:
+    """Registration metadata declares action-scoped grants and retired legacy function names."""
+    module = _load_tools_module()
+    metadata = module.test_registrations["thread_worktree"]
+
+    assert metadata.action_scoped_grants == ("thread_worktree",)
+    assert metadata.retired_functions == {
+        "use_worktree": "thread_worktree",
+        "leave_worktree": "thread_worktree",
+        "get_worktree": "thread_worktree",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["get", "leave"])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"path": "worktrees/a"},
+        {"path": ""},
+        {"branch": "feat"},
+        {"branch": ""},
+        {"repo": "chat"},
+        {"repo": ""},
+        {"path": "worktrees/a", "branch": "feat", "repo": "chat"},
+    ],
+)
+async def test_get_and_leave_reject_use_parameters(
+    tmp_path: Path, action: str, kwargs: dict[str, str]
+) -> None:
+    """`get` and `leave` reject `path`, `branch`, and `repo` instead of ignoring them."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root):
+        result = json.loads(await tools.thread_worktree(action, **kwargs))  # type: ignore[arg-type]
+
+    assert result["status"] == "error"
+    assert result["tool"] == "thread_worktree"
+    assert result["action"] == action
+    for name in kwargs:
+        assert f"'{name}'" in result["message"]
+    room.querier.assert_not_awaited()
+    room.putter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [None, "", "   "])
+async def test_use_requires_non_empty_path(tmp_path: Path, path: str | None) -> None:
+    """`use` requires a non-empty `path`."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root):
+        result = json.loads(await tools.thread_worktree("use", path=path))
+
+    assert result["status"] == "error"
+    assert result["tool"] == "thread_worktree"
+    assert result["action"] == "use"
+    assert "'path'" in result["message"]
+    assert room.state == {}
+    room.putter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["invalid", "", "use_worktree"])
+async def test_invalid_action_returns_error(tmp_path: Path, action: str) -> None:
+    """An unknown action returns a structured error payload without touching state."""
+    tools = _load_tools_module().ThreadWorktreeTools()
+    room = FakeRoomState()
+    root = _workspace(tmp_path)
+
+    with room.context(root):
+        result = json.loads(await tools.thread_worktree(action))  # type: ignore[arg-type]
+
+    assert result["status"] == "error"
+    assert result["tool"] == "thread_worktree"
+    assert "action" not in result
+    assert "use, get, leave" in result["message"]
+    room.querier.assert_not_awaited()
+    room.putter.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -182,7 +291,7 @@ async def test_long_path_is_refused(tmp_path: Path, path: str) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        result = json.loads(await tools.use_worktree(path))
+        result = json.loads(await tools.thread_worktree("use", path))
 
     assert result["status"] == "error"
     assert "existing directory inside your workspace" in result["message"]
@@ -198,8 +307,12 @@ async def test_use_worktree_writes_and_is_idempotent(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        first = json.loads(await tools.use_worktree("worktrees/a", " feature-a "))
-        again = json.loads(await tools.use_worktree("worktrees/a", "feature-a"))
+        first = json.loads(
+            await tools.thread_worktree("use", "worktrees/a", " feature-a ")
+        )
+        again = json.loads(
+            await tools.thread_worktree("use", "worktrees/a", "feature-a")
+        )
 
     assert first["status"] == "ok"
     assert first["tool"] == "thread_worktree"
@@ -236,8 +349,10 @@ async def test_unrestricted_agent_ties_a_directory_outside_its_workspace(
     outside.mkdir(parents=True)
 
     with room.context(root, file_access="unrestricted"):
-        result = json.loads(await tools.use_worktree(str(outside), "fix", "chat"))
-        shown = json.loads(await tools.get_worktree())
+        result = json.loads(
+            await tools.thread_worktree("use", str(outside), "fix", "chat")
+        )
+        shown = json.loads(await tools.thread_worktree("get"))
 
     assert result["status"] == "ok"
     assert result["path"] == outside.as_posix()
@@ -266,9 +381,9 @@ async def test_outside_tie_does_not_apply_to_a_confined_agent(tmp_path: Path) ->
     outside.mkdir(parents=True)
 
     with room.context(root, file_access="unrestricted"):
-        await tools.use_worktree(str(outside))
+        await tools.thread_worktree("use", str(outside))
     with room.context(root):
-        shown = json.loads(await tools.get_worktree())
+        shown = json.loads(await tools.thread_worktree("get"))
 
     assert shown["path"] == outside.as_posix()
     assert shown["exists"] is False
@@ -291,7 +406,7 @@ async def test_hand_written_absolute_tie_inside_the_workspace_does_not_apply(
     }
 
     with room.context(root):
-        shown = json.loads(await tools.get_worktree())
+        shown = json.loads(await tools.thread_worktree("get"))
 
     assert (shown["exists"], shown["applies"]) == (False, False)
 
@@ -310,8 +425,10 @@ async def test_invalid_names_are_refused_before_the_directory_is_checked(
         room.context(root),
         patch.object(module, "tied_path", side_effect=AssertionError("checked")),
     ):
-        branch = json.loads(await tools.use_worktree("worktrees/a", "a b"))
-        repo = json.loads(await tools.use_worktree("worktrees/a", "fix", "a b"))
+        branch = json.loads(await tools.thread_worktree("use", "worktrees/a", "a b"))
+        repo = json.loads(
+            await tools.thread_worktree("use", "worktrees/a", "fix", "a b")
+        )
 
     assert (branch["status"], repo["status"]) == ("error", "error")
     assert room.state == {}
@@ -327,10 +444,16 @@ async def test_repo_is_stored_as_given_and_a_changed_one_is_a_change(
     root = _workspace(tmp_path)
 
     with room.context(root):
-        first = json.loads(await tools.use_worktree("worktrees/a", "fix", " org/chat "))
-        again = json.loads(await tools.use_worktree("worktrees/a", "fix", "org/chat"))
-        other = json.loads(await tools.use_worktree("worktrees/a", "fix", "chat"))
-        shown = json.loads(await tools.get_worktree())
+        first = json.loads(
+            await tools.thread_worktree("use", "worktrees/a", "fix", " org/chat ")
+        )
+        again = json.loads(
+            await tools.thread_worktree("use", "worktrees/a", "fix", "org/chat")
+        )
+        other = json.loads(
+            await tools.thread_worktree("use", "worktrees/a", "fix", "chat")
+        )
+        shown = json.loads(await tools.thread_worktree("get"))
 
     assert (first["repo"], first["changed"]) == ("org/chat", True)
     assert again["changed"] is False
@@ -350,7 +473,9 @@ async def test_invalid_repo_is_refused(tmp_path: Path, repo: str) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        result = json.loads(await tools.use_worktree("worktrees/a", "feat", repo))
+        result = json.loads(
+            await tools.thread_worktree("use", "worktrees/a", "feat", repo)
+        )
 
     assert result["status"] == "error"
     assert "repository must have at most 100 characters" in result["message"]
@@ -365,8 +490,8 @@ async def test_use_worktree_changed_branch_rewrites(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        await tools.use_worktree("worktrees/a", "one")
-        result = json.loads(await tools.use_worktree("worktrees/a", "two"))
+        await tools.thread_worktree("use", "worktrees/a", "one")
+        result = json.loads(await tools.thread_worktree("use", "worktrees/a", "two"))
 
     assert result["changed"] is True
     assert room.state[_key()]["branch"] == "two"
@@ -381,9 +506,9 @@ async def test_another_agent_replaces_the_tie_and_is_told_whose(tmp_path: Path) 
     root = _workspace(tmp_path)
 
     with room.context(root, agent_name="code"):
-        await tools.use_worktree("worktrees/a", "feat")
+        await tools.thread_worktree("use", "worktrees/a", "feat")
     with room.context(root, agent_name="reviewer"):
-        result = json.loads(await tools.use_worktree("worktrees/a", "feat"))
+        result = json.loads(await tools.thread_worktree("use", "worktrees/a", "feat"))
 
     assert result["status"] == "ok"
     assert result["changed"] is True
@@ -402,7 +527,9 @@ async def test_absolute_path_inside_workspace_is_stored_relative(
     root = _workspace(tmp_path)
 
     with room.context(root):
-        result = json.loads(await tools.use_worktree(str(root / "worktrees" / "a")))
+        result = json.loads(
+            await tools.thread_worktree("use", str(root / "worktrees" / "a"))
+        )
 
     assert result["status"] == "ok"
     assert room.state[_key()]["path"] == "worktrees/a"
@@ -421,13 +548,13 @@ async def test_symlink_is_followed_only_with_unrestricted_access(
     (root / "alias").symlink_to(root / "worktrees" / "a")
 
     with room.context(root):
-        confined = json.loads(await tools.use_worktree("alias"))
+        confined = json.loads(await tools.thread_worktree("use", "alias"))
     assert confined["status"] == "error"
     assert "no part of the path may be a link" in confined["message"]
     assert room.state == {}
 
     with room.context(root, file_access="unrestricted"):
-        result = json.loads(await tools.use_worktree("alias"))
+        result = json.loads(await tools.thread_worktree("use", "alias"))
 
     assert result["status"] == "ok"
     assert result["path"] == "worktrees/a"
@@ -443,7 +570,7 @@ async def test_path_spellings_are_normalized(tmp_path: Path, spelling: str) -> N
     root = _workspace(tmp_path)
 
     with room.context(root):
-        result = json.loads(await tools.use_worktree(spelling))
+        result = json.loads(await tools.thread_worktree("use", spelling))
 
     assert result["status"] == "ok"
     assert room.state[_key()]["path"] == "worktrees/a"
@@ -471,13 +598,12 @@ async def test_refused_directories_write_nothing(tmp_path: Path) -> None:
         "link/",
         "worktrees/inner-link",
         ".",
-        "",
         str(root),
         "a\0b",
     ]
     with room.context(root):
         for candidate in candidates:
-            result = json.loads(await tools.use_worktree(candidate))
+            result = json.loads(await tools.thread_worktree("use", candidate))
             assert result["status"] == "error", candidate
             assert result["tool"] == "thread_worktree"
             assert result["action"] == "use"
@@ -500,7 +626,9 @@ async def test_directory_with_a_forbidden_character_is_refused(
     (root / "worktrees" / f"a{character}b").mkdir()
 
     with room.context(root):
-        result = json.loads(await tools.use_worktree(f"worktrees/a{character}b"))
+        result = json.loads(
+            await tools.thread_worktree("use", f"worktrees/a{character}b")
+        )
 
     assert result["status"] == "error"
     assert "existing directory inside your workspace" in result["message"]
@@ -517,7 +645,7 @@ async def test_failed_write_errors(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        result = json.loads(await tools.use_worktree("worktrees/a"))
+        result = json.loads(await tools.thread_worktree("use", "worktrees/a"))
 
     assert result["status"] == "error"
 
@@ -530,10 +658,10 @@ async def test_leave_clears_only_when_set(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        none_set = json.loads(await tools.leave_worktree())
+        none_set = json.loads(await tools.thread_worktree("leave"))
         room.putter.assert_not_awaited()
-        await tools.use_worktree("worktrees/a", "b")
-        left = json.loads(await tools.leave_worktree())
+        await tools.thread_worktree("use", "worktrees/a", "b")
+        left = json.loads(await tools.thread_worktree("leave"))
 
     assert none_set["status"] == "ok"
     assert none_set["action"] == "leave"
@@ -551,12 +679,12 @@ async def test_leave_names_another_agents_tie(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root, agent_name="code"):
-        await tools.use_worktree("worktrees/a", "feat")
+        await tools.thread_worktree("use", "worktrees/a", "feat")
     with room.context(root, agent_name="reviewer"):
-        result = json.loads(await tools.leave_worktree())
+        result = json.loads(await tools.thread_worktree("leave"))
     with room.context(root, agent_name="code"):
-        await tools.use_worktree("worktrees/a", "feat")
-        own = json.loads(await tools.leave_worktree())
+        await tools.thread_worktree("use", "worktrees/a", "feat")
+        own = json.loads(await tools.thread_worktree("leave"))
 
     assert result["changed"] is True
     assert result["cleared_set_by"] == "code"
@@ -577,7 +705,7 @@ async def test_leave_failed_write_errors(tmp_path: Path) -> None:
     }
 
     with room.context(_workspace(tmp_path)):
-        result = json.loads(await tools.leave_worktree())
+        result = json.loads(await tools.thread_worktree("leave"))
 
     assert result["status"] == "error"
 
@@ -590,9 +718,9 @@ async def test_get_worktree(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        empty = json.loads(await tools.get_worktree())
-        await tools.use_worktree("worktrees/a", "b")
-        found = json.loads(await tools.get_worktree())
+        empty = json.loads(await tools.thread_worktree("get"))
+        await tools.thread_worktree("use", "worktrees/a", "b")
+        found = json.loads(await tools.thread_worktree("get"))
 
     assert empty["status"] == "ok"
     assert empty["action"] == "get"
@@ -614,9 +742,9 @@ async def test_get_worktree_reports_a_removed_directory(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        await tools.use_worktree("worktrees/a", "b")
+        await tools.thread_worktree("use", "worktrees/a", "b")
         (root / "worktrees" / "a").rmdir()
-        found = json.loads(await tools.get_worktree())
+        found = json.loads(await tools.thread_worktree("get"))
 
     assert found["path"] == "worktrees/a"
     assert found["exists"] is False
@@ -631,9 +759,9 @@ async def test_get_worktree_reports_another_agents_tie(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root, agent_name="code"):
-        await tools.use_worktree("worktrees/a", "b")
+        await tools.thread_worktree("use", "worktrees/a", "b")
     with room.context(root, agent_name="reviewer"):
-        found = json.loads(await tools.get_worktree())
+        found = json.loads(await tools.thread_worktree("get"))
 
     assert found["set_by"] == "code"
     assert found["exists"] is True
@@ -649,9 +777,9 @@ async def test_every_tool_errors_outside_a_thread(tmp_path: Path) -> None:
 
     with room.context(root, thread_id=None, resolved_thread_id=None):
         results = [
-            json.loads(await tools.use_worktree("worktrees/a")),
-            json.loads(await tools.leave_worktree()),
-            json.loads(await tools.get_worktree()),
+            json.loads(await tools.thread_worktree("use", "worktrees/a")),
+            json.loads(await tools.thread_worktree("leave")),
+            json.loads(await tools.thread_worktree("get")),
         ]
 
     assert [result["status"] for result in results] == ["error"] * 3
@@ -676,9 +804,9 @@ async def test_tools_use_the_resolved_thread(
     root = _workspace(tmp_path)
 
     with room.context(root, thread_id=thread_id, resolved_thread_id=resolved_thread_id):
-        used = json.loads(await tools.use_worktree("worktrees/a", "feat"))
-        found = json.loads(await tools.get_worktree())
-        left = json.loads(await tools.leave_worktree())
+        used = json.loads(await tools.thread_worktree("use", "worktrees/a", "feat"))
+        found = json.loads(await tools.thread_worktree("get"))
+        left = json.loads(await tools.thread_worktree("leave"))
 
     assert [used["status"], found["status"], left["status"]] == ["ok"] * 3
     assert [used["thread_id"], found["thread_id"], left["thread_id"]] == [
@@ -717,7 +845,7 @@ async def test_tie_written_by_the_tool_is_what_the_hook_reads(tmp_path: Path) ->
     root = _workspace(tmp_path)
 
     with room.context(root, agent_name="code"):
-        await tools.use_worktree("worktrees/a", "feat")
+        await tools.thread_worktree("use", "worktrees/a", "feat")
     tying, other = _turn(room, "code"), _turn(room, "reviewer")
     told = await hooks.add_thread_worktree_instruction(tying)
     not_told = await hooks.add_thread_worktree_instruction(other)
@@ -728,7 +856,7 @@ async def test_tie_written_by_the_tool_is_what_the_hook_reads(tmp_path: Path) ->
     assert not_told is None
 
     with room.context(root, agent_name="code"):
-        await tools.leave_worktree()
+        await tools.thread_worktree("leave")
     after_leaving = _turn(room, "code")
     assert await hooks.add_thread_worktree_instruction(after_leaving) is None
     for turn in (tying, other, after_leaving):
@@ -755,7 +883,7 @@ async def test_invalid_branch_is_refused(tmp_path: Path, branch: str) -> None:
     root = _workspace(tmp_path)
 
     with room.context(root):
-        result = json.loads(await tools.use_worktree("worktrees/a", branch))
+        result = json.loads(await tools.thread_worktree("use", "worktrees/a", branch))
 
     assert result["status"] == "error"
     assert "A-Z a-z 0-9" in result["message"]

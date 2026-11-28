@@ -32,7 +32,7 @@ INSTRUCTION = (
     "This thread works in the git worktree `worktrees/fix` (branch `fix`), a directory inside your workspace. "
     'Start every shell command for this thread\'s work with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/fix" &&`. '
     "For file tools, name files with the prefix `worktrees/fix/`. "
-    "If the directory is missing, tell the user and call leave_worktree."
+    'If the directory is missing, tell the user and call `thread_worktree(action="leave")`.'
 )
 
 
@@ -133,10 +133,12 @@ async def test_tie_without_a_branch_leaves_out_the_branch() -> None:
     items = await _run(ctx)
 
     assert [item.text for item in items] == [
-        "This thread works in the git worktree `worktrees/fix`, a directory inside your workspace. "
-        'Start every shell command for this thread\'s work with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/fix" &&`. '
-        "For file tools, name files with the prefix `worktrees/fix/`. "
-        "If the directory is missing, tell the user and call leave_worktree.",
+        (
+            "This thread works in the git worktree `worktrees/fix`, a directory inside your workspace. "
+            'Start every shell command for this thread\'s work with `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/fix" &&`. '
+            "For file tools, name files with the prefix `worktrees/fix/`. "
+            'If the directory is missing, tell the user and call `thread_worktree(action="leave")`.'
+        ),
     ]
 
 
@@ -275,10 +277,12 @@ async def test_tie_outside_the_workspace_names_its_absolute_path() -> None:
     items = await _run(_context(content=ABSOLUTE, file_access="unrestricted"))
 
     assert [item.text for item in items] == [
-        "This thread works in the git worktree `/srv/repo-worktrees/fix` (branch `fix`), a directory outside your "
-        'workspace. Start every shell command for this thread\'s work with `cd "/srv/repo-worktrees/fix" &&`. '
-        "For file tools, name files with the prefix `/srv/repo-worktrees/fix/`. "
-        "If the directory is missing, tell the user and call leave_worktree.",
+        (
+            "This thread works in the git worktree `/srv/repo-worktrees/fix` (branch `fix`), a directory outside your "
+            'workspace. Start every shell command for this thread\'s work with `cd "/srv/repo-worktrees/fix" &&`. '
+            "For file tools, name files with the prefix `/srv/repo-worktrees/fix/`. "
+            'If the directory is missing, tell the user and call `thread_worktree(action="leave")`.'
+        ),
     ]
 
 
