@@ -197,6 +197,19 @@ def test_toolkit_metadata_and_adapted_schema(tmp_path: Path) -> None:
     assert "mindroom_output_path" not in properties
 
 
+def test_approval_and_retirement_metadata() -> None:
+    """Registration metadata declares action-scoped grants and retired legacy function names."""
+    module = _load_tools_module()
+    metadata = module.test_registrations["thread_worktree"]
+
+    assert metadata.action_scoped_grants == ("thread_worktree",)
+    assert metadata.retired_functions == {
+        "use_worktree": "thread_worktree",
+        "leave_worktree": "thread_worktree",
+        "get_worktree": "thread_worktree",
+    }
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["get", "leave"])
 @pytest.mark.parametrize(

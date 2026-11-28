@@ -99,11 +99,7 @@ def _validate_action_params(
         )
     provided = {"path": path, "branch": branch, "repo": repo}
     allowed = _ALLOWED_PARAMS[action]
-    unexpected = [
-        name
-        for name, value in provided.items()
-        if value is not None and name not in allowed
-    ]
+    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
     if unexpected:
         names = ", ".join(f"'{name}'" for name in unexpected)
         return _error(
@@ -123,15 +119,11 @@ def _resolve_state_access(
     """Resolve the active thread scope and room-state bindings."""
     context = get_tool_runtime_context()
     if context is None:
-        return _error(
-            action, "Thread worktree tool context is unavailable in this runtime path."
-        )
+        return _error(action, "Thread worktree tool context is unavailable in this runtime path.")
     if context.resolved_thread_id is None:
         return _error(action, f"An active thread is required to {action} a worktree.")
     bindings = context.hooks
-    if bindings.room_state_querier is None or (
-        require_putter and bindings.room_state_putter is None
-    ):
+    if bindings.room_state_querier is None or (require_putter and bindings.room_state_putter is None):
         return _error(
             action,
             "Thread worktree room-state access is unavailable in this runtime path.",
@@ -143,9 +135,7 @@ async def _tied_path(context: ToolRuntimeContext, path: str) -> str | None:
     """Return how a tie names the directory `path` for the calling agent, or None when it may not tie it."""
     access = file_access(context.config, context.agent_name)
     # Off the event loop: finding the workspace and checking the path both ask the filesystem, which can be slow.
-    return await asyncio.to_thread(
-        lambda: tied_path(context.agent_workspace_root(), path, access)
-    )
+    return await asyncio.to_thread(lambda: tied_path(context.agent_workspace_root(), path, access))
 
 
 class ThreadWorktreeTools(Toolkit):
@@ -170,27 +160,22 @@ class ThreadWorktreeTools(Toolkit):
     ) -> str:
         """Bind, inspect, or clear this thread's git worktree.
 
-        - `use`: tie the current thread to an existing directory (`path`, optional `branch` and `repo`).
-          Replaces any earlier tie.
+        - `use`: tie this thread to an existing directory (`path`, optional `branch` and `repo`). Replaces any earlier tie.
         - `get`: show the thread's current worktree (`exists` and `applies`).
         - `leave`: clear the thread's worktree tie before removing the worktree.
 
         Args:
             action: Action to perform (`use`, `get`, or `leave`).
-            path: Workspace-relative directory (e.g. `worktrees/<name>`), or absolute path with
-                unrestricted file access (`use` only).
+            path: Workspace-relative directory (e.g. `worktrees/<name>`), or absolute path if unrestricted (`use` only).
             branch: Optional branch label (`use` only).
             repo: Optional repository label (`use` only; spell consistently across threads).
 
         """
-        if (
-            error := _validate_action_params(
-                action, path=path, branch=branch, repo=repo
-            )
-        ) is not None:
+        if (error := _validate_action_params(action, path=path, branch=branch, repo=repo)) is not None:
             return error
         if action == "use":
-            assert path is not None
+            if path is None:
+                return _error("use", "Parameter 'path' is required for action='use'.")
             return await self._use_worktree(path, branch=branch, repo=repo)
         if action == "get":
             return await self._get_worktree()
@@ -218,22 +203,15 @@ class ThreadWorktreeTools(Toolkit):
         if not valid_branch(repo):
             return _error("use", f"The repository must have {_NAME_RULE}.")
         # A relative path is checked as the state checks it before the filesystem is touched.
-        if not path.startswith("/") and not valid_worktree_path(
-            path.removeprefix("./").removesuffix("/")
-        ):
+        if not path.startswith("/") and not valid_worktree_path(path.removeprefix("./").removesuffix("/")):
             return _error("use", _REFUSAL)
         tied = await _tied_path(context, path)
         if tied is None:
             return _error("use", _REFUSAL)
 
-        current = await read_thread_worktree(
-            bindings.room_state_querier, room_id, thread_id
-        )
+        current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
         tie = (tied, branch, repo, context.agent_name)
-        if (
-            current is not None
-            and (current.path, current.branch, current.repo, current.set_by) == tie
-        ):
+        if current is not None and (current.path, current.branch, current.repo, current.set_by) == tie:
             return _payload(
                 "ok",
                 action="use",
@@ -247,9 +225,7 @@ class ThreadWorktreeTools(Toolkit):
 
         # The tie is one agent's; another agent's tie of this thread is replaced, and the answer says whose it was.
         worktree = ThreadWorktree(tied, branch, context.agent_name, _now_iso(), repo)
-        if not await write_thread_worktree(
-            bindings.room_state_putter, room_id, thread_id, worktree
-        ):
+        if not await write_thread_worktree(bindings.room_state_putter, room_id, thread_id, worktree):
             return _error("use", "Failed to write the worktree state event.")
         replaced = (
             {"replaced": {"path": current.path, "set_by": current.set_by}}
@@ -274,24 +250,14 @@ class ThreadWorktreeTools(Toolkit):
             return resolved
         context, room_id, thread_id, bindings = resolved
 
-        current = await read_thread_worktree(
-            bindings.room_state_querier, room_id, thread_id
-        )
+        current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
         if current is None:
             return _payload("ok", action="leave", thread_id=thread_id, changed=False)
-        if not await clear_thread_worktree(
-            bindings.room_state_putter, room_id, thread_id
-        ):
+        if not await clear_thread_worktree(bindings.room_state_putter, room_id, thread_id):
             return _error("leave", "Failed to clear the worktree state event.")
         # Another agent's tie is cleared too, and the answer says whose it was.
-        cleared = (
-            {"cleared_set_by": current.set_by}
-            if current.set_by != context.agent_name
-            else {}
-        )
-        return _payload(
-            "ok", action="leave", thread_id=thread_id, changed=True, **cleared
-        )
+        cleared = {"cleared_set_by": current.set_by} if current.set_by != context.agent_name else {}
+        return _payload("ok", action="leave", thread_id=thread_id, changed=True, **cleared)
 
     async def _get_worktree(self) -> str:
         resolved = _resolve_state_access(action="get", require_putter=False)
@@ -299,9 +265,7 @@ class ThreadWorktreeTools(Toolkit):
             return resolved
         context, room_id, thread_id, bindings = resolved
 
-        current = await read_thread_worktree(
-            bindings.room_state_querier, room_id, thread_id
-        )
+        current = await read_thread_worktree(bindings.room_state_querier, room_id, thread_id)
         if current is None:
             return _payload("ok", action="get", thread_id=thread_id)
         # The tie's own spelling: a path written by hand that only resolves to a directory is not one the hook uses.
@@ -333,6 +297,12 @@ class ThreadWorktreeTools(Toolkit):
     icon="LuGitBranch",
     icon_color="text-green-600",
     requires_room_context=True,
+    action_scoped_grants=("thread_worktree",),
+    retired_functions={
+        "use_worktree": "thread_worktree",
+        "leave_worktree": "thread_worktree",
+        "get_worktree": "thread_worktree",
+    },
 )
 def thread_worktree_factory() -> type[ThreadWorktreeTools]:
     """Factory function for the thread-worktree toolkit."""
