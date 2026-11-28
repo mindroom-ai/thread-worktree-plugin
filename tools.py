@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from typing import Literal
 
 from mindroom.plugin_api import (
     HookBindings,
@@ -33,17 +34,17 @@ from .state import (
     write_thread_worktree,
 )
 
-
 _INSTRUCTIONS = """\
 A coding task gets its own git worktree before the first change, in a thread that has none:
 1. Make it where and how your own instructions say. Without any, use the shell with absolute paths: \
 `git -C "$MINDROOM_AGENT_WORKSPACE/<clone>" worktree add "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" -b <branch>`.
-2. Call `use_worktree("worktrees/<name>", "<branch>", "<repository>")`; the path is relative to your workspace, or \
-absolute for a worktree outside it, which only an agent with unrestricted file access may tie.
+2. Call `thread_worktree(action="use", path="worktrees/<name>", branch="<branch>", repo="<repository>")`; \
+the path is relative to your workspace, or absolute for a worktree outside it, which only an agent with \
+unrestricted file access may tie.
 3. Start every shell command for this work with `cd` into the worktree, such as \
 `cd "$MINDROOM_AGENT_WORKSPACE/worktrees/<name>" &&`, and give file tools paths inside it; \
 from the thread's next turn your system prompt reminds you.
-4. Call `leave_worktree` before you remove the worktree."""
+4. Call `thread_worktree(action="leave")` before you remove the worktree."""
 
 _REFUSAL = (
     "Expected an existing directory inside your workspace, other than the workspace itself, "
@@ -54,6 +55,11 @@ _REFUSAL = (
     " be allowed to read the directory."
 )
 _NAME_RULE = f"at most {MAX_BRANCH_LENGTH} characters, only A-Z a-z 0-9 . _ - and /"
+_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+    "use": frozenset({"path", "branch", "repo"}),
+    "get": frozenset(),
+    "leave": frozenset(),
+}
 
 
 def _note(path: str) -> str:
@@ -75,6 +81,38 @@ def _payload(status: str, **kwargs: object) -> str:
 
 def _error(action: str, message: str) -> str:
     return _payload("error", action=action, message=message)
+
+
+def _validate_action_params(
+    action: object,
+    *,
+    path: str | None,
+    branch: str | None,
+    repo: str | None,
+) -> str | None:
+    """Validate `action` and reject unexpected or missing parameters."""
+    if not isinstance(action, str) or action not in _ALLOWED_PARAMS:
+        expected = ", ".join(_ALLOWED_PARAMS)
+        return _payload(
+            "error",
+            message=f"Unsupported thread_worktree action {action!r}. Expected one of: {expected}.",
+        )
+    provided = {"path": path, "branch": branch, "repo": repo}
+    allowed = _ALLOWED_PARAMS[action]
+    unexpected = [
+        name
+        for name, value in provided.items()
+        if value is not None and name not in allowed
+    ]
+    if unexpected:
+        names = ", ".join(f"'{name}'" for name in unexpected)
+        return _error(
+            action,
+            f"Parameter(s) {names} cannot be used with action={action!r}.",
+        )
+    if action == "use" and (not isinstance(path, str) or not path.strip()):
+        return _error(action, "Parameter 'path' is required for action='use'.")
+    return None
 
 
 def _resolve_state_access(
@@ -113,6 +151,9 @@ async def _tied_path(context: ToolRuntimeContext, path: str) -> str | None:
 class ThreadWorktreeTools(Toolkit):
     """Toolkit for tying a Matrix thread to a directory the agent works in."""
 
+    offer_background_after = False
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(
             name="thread_worktree",
@@ -120,25 +161,58 @@ class ThreadWorktreeTools(Toolkit):
         )
 
     @tool
-    async def use_worktree(self, path: str, branch: str = "", repo: str = "") -> str:
-        """Tie the current thread to a directory you work in, such as a git worktree you made.
+    async def thread_worktree(
+        self,
+        action: Literal["use", "get", "leave"],
+        path: str | None = None,
+        branch: str | None = None,
+        repo: str | None = None,
+    ) -> str:
+        """Bind, inspect, or clear this thread's git worktree.
 
-        Start shell commands for this work with `cd` into it, as the answer's note says. Other agents in the thread are
-        not told. A thread's earlier tie is replaced.
+        - `use`: tie the current thread to an existing directory (`path`, optional `branch` and `repo`).
+          Replaces any earlier tie.
+        - `get`: show the thread's current worktree (`exists` and `applies`).
+        - `leave`: clear the thread's worktree tie before removing the worktree.
 
         Args:
-            path: An existing directory inside your workspace, relative to the workspace root, such as
-                `worktrees/<name>`; with unrestricted file access also one outside it, by its absolute path.
-            branch: The worktree's branch, shown with the thread; optional.
-            repo: The name of the worktree's repository, shown before the branch in a room that works on several;
-                optional. Spell one repository the same way in every thread, such as its clone's name.
+            action: Action to perform (`use`, `get`, or `leave`).
+            path: Workspace-relative directory (e.g. `worktrees/<name>`), or absolute path with
+                unrestricted file access (`use` only).
+            branch: Optional branch label (`use` only).
+            repo: Optional repository label (`use` only; spell consistently across threads).
 
         """
+        if (
+            error := _validate_action_params(
+                action, path=path, branch=branch, repo=repo
+            )
+        ) is not None:
+            return error
+        if action == "use":
+            assert path is not None
+            return await self._use_worktree(path, branch=branch, repo=repo)
+        if action == "get":
+            return await self._get_worktree()
+        return await self._leave_worktree()
+
+    async def _use_worktree(
+        self,
+        path: str,
+        *,
+        branch: str | None = None,
+        repo: str | None = None,
+    ) -> str:
         resolved = _resolve_state_access(action="use", require_putter=True)
         if isinstance(resolved, str):
             return resolved
         context, room_id, thread_id, bindings = resolved
-        branch, repo = branch.strip(), repo.strip()
+        if branch is not None and not isinstance(branch, str):
+            return _error("use", f"The branch must have {_NAME_RULE}.")
+        if repo is not None and not isinstance(repo, str):
+            return _error("use", f"The repository must have {_NAME_RULE}.")
+        branch = "" if branch is None else branch.strip()
+        repo = "" if repo is None else repo.strip()
         if not valid_branch(branch):
             return _error("use", f"The branch must have {_NAME_RULE}.")
         if not valid_branch(repo):
@@ -194,12 +268,7 @@ class ThreadWorktreeTools(Toolkit):
             **replaced,
         )
 
-    @tool
-    async def leave_worktree(self) -> str:
-        """Untie the current thread from its worktree; from its next turn your system prompt no longer names it.
-
-        Call it before you remove the worktree.
-        """
+    async def _leave_worktree(self) -> str:
         resolved = _resolve_state_access(action="leave", require_putter=True)
         if isinstance(resolved, str):
             return resolved
@@ -224,13 +293,7 @@ class ThreadWorktreeTools(Toolkit):
             "ok", action="leave", thread_id=thread_id, changed=True, **cleared
         )
 
-    @tool
-    async def get_worktree(self) -> str:
-        """Show the worktree directory of the current thread, if it has one.
-
-        `exists` says whether the directory is an existing directory you may tie, and `applies` whether the tie is
-        yours: you made it and its directory exists.
-        """
+    async def _get_worktree(self) -> str:
         resolved = _resolve_state_access(action="get", require_putter=False)
         if isinstance(resolved, str):
             return resolved
@@ -259,8 +322,8 @@ class ThreadWorktreeTools(Toolkit):
 
 @register_tool_with_metadata(
     name="thread_worktree",
-    # `use_worktree` checks a directory the model names, inside the workspace unless the agent's file access is
-    # unrestricted.
+    # `thread_worktree(action="use", ...)` checks a directory the model names, inside the workspace unless the
+    # agent's file access is unrestricted.
     file_access=ToolFileAccess.AGENT,
     display_name="Thread Worktree",
     description="Tie the current Matrix thread to the git worktree directory the agent works in.",

@@ -27,7 +27,7 @@ def _worktree_instruction(worktree: ThreadWorktree) -> str:
         f"This thread works in the git worktree `{path}`{branch}, a directory {place} your workspace. "
         f'Start every shell command for this thread\'s work with `cd "{shell_path(path)}" &&`. '
         f"For file tools, name files with the prefix `{path}/`. "
-        "If the directory is missing, tell the user and call leave_worktree."
+        'If the directory is missing, tell the user and call `thread_worktree(action="leave")`.'
     )
 
 
