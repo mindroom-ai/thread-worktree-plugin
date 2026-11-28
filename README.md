@@ -44,7 +44,7 @@ agents:
 No plugin settings are required; the hook runs automatically once loaded.
 
 Update later with `mindroom plugins update thread-worktree-plugin`.
-Needs a MindRoom version supporting plugin API 1.35 or later.
+Needs a MindRoom version supporting plugin API 1.40 or later.
 
 ## Tools
 
